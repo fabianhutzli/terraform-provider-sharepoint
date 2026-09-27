@@ -21,7 +21,7 @@ Run these before opening a PR. CI runs the same checks (build, vet, fmt, test, l
 
 ## Testing against a real tenant
 
-You'll usually want to test against one of two things: your current local changes, or an actual signed release. These use different installation mechanisms, since only one of them needs the Terraform Registry to be reachable (which it isn't yet — see [Releasing](#releasing-maintainers)).
+You'll usually want to test against one of two things: your current local changes, or an actual signed release. Released versions install from the [Terraform Registry](https://registry.terraform.io/providers/fabianhutzli/sharepoint/latest) like any other provider, so there's nothing special to set up for those. Local changes need a `dev_overrides` config.
 
 **Dev mode — test local changes**, via a `dev_overrides` CLI config that always points at a binary built from your working tree, ignoring any version/registry resolution entirely:
 
@@ -55,9 +55,9 @@ make install-release VERSION=0.1.0
 terraform init
 ```
 
-This resolves through ordinary provider installation (no overrides), so it's the closest thing to what an end user testing the release actually gets, without needing the provider to be listed on registry.terraform.io yet.
+This installs from a local filesystem mirror instead of the registry. That is useful for testing a GitHub release artifact directly, for example before the registry has picked it up.
 
-**Important:** if you're testing against a working directory that already has real applied state (for example one you've applied real resources from), switch to a separate, empty workspace before using dev mode — `terraform init` still needs to resolve *some* real version for providers already recorded in state, even under `dev_overrides`, and that lookup fails until the provider is actually live on the registry:
+**Important:** if you're testing against a working directory that already has real applied state (for example one you've applied real resources from), switch to a separate, empty workspace before using dev mode, so a dev build never plans or applies against tracked infrastructure:
 
 ```sh
 TF_CLI_CONFIG_FILE=~/.terraformrc.dev terraform workspace new dev
@@ -89,4 +89,4 @@ Resource and attribute descriptions live in the `Description` fields of each res
 
 ## Releasing (maintainers)
 
-Releases are built by GoReleaser (`.goreleaser.yml`) and triggered by pushing a `v*` tag, via `.github/workflows/release.yml`. That workflow needs two repository secrets: `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`, for a GPG key whose public key is registered with your Terraform Registry publisher account (the registry requires release checksums to be signed by a key it knows about). Tag with `git tag vX.Y.Z && git push origin vX.Y.Z` once `CHANGELOG.md` reflects the release.
+Releases are built by GoReleaser (`.goreleaser.yml`) and triggered by pushing a `v*` tag, via `.github/workflows/release.yml`. That workflow needs two repository secrets: `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`, for a GPG key whose public key is registered with your Terraform Registry publisher account (the registry requires release checksums to be signed by a key it knows about). Tag with `git tag vX.Y.Z && git push origin vX.Y.Z` once `CHANGELOG.md` reflects the release. The Terraform Registry picks up the new GitHub release automatically through its webhook, usually within a few minutes.
