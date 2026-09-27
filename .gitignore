@@ -1,0 +1,20 @@
+# Certificates / credentials
+cert.pem
+key.pem
+*.pfx
+*.p12
+
+# Terraform working files (examples are documentation, not deployed configs)
+examples/**/terraform.tfvars
+examples/**/.terraform/
+examples/**/.terraform.lock.hcl
+examples/**/terraform.tfstate
+examples/**/terraform.tfstate.backup
+*.tfstate
+*.tfstate.backup
+crash.log
+crash.*.log
+
+# Build output
+/terraform-provider-sharepoint
+/dist/

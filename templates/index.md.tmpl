@@ -1,0 +1,35 @@
+---
+page_title: "Provider: SharePoint"
+description: |-
+  {{ .Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# SharePoint Provider
+
+The SharePoint provider manages Microsoft SharePoint Online: sites and hub sites, lists, views and columns, permission levels and site groups, site scripts and site designs, themes, SPFx solutions and extensions, and tenant-wide settings.
+
+## Requirements
+
+The provider does not call the SharePoint or Graph REST APIs itself. It runs the [CLI for Microsoft 365](https://pnp.github.io/cli-microsoft365/) (`m365`) for every operation, so the `m365` CLI must be installed and on `PATH` on the machine running Terraform:
+
+```sh
+npm install -g @pnp/cli-microsoft365
+```
+
+## Authentication
+
+The provider signs in unattended (app-only) with an Entra ID app registration and a certificate:
+
+1. Register an application in Entra ID and grant it the SharePoint application permissions your configuration needs, for example `Sites.FullControl.All`.
+2. Create a certificate and upload its public key to the app registration.
+3. Configure the provider with the app's client ID, your tenant, and the PFX certificate, either as a file path or inline as base64.
+
+All attributes can also be set through environment variables: `SHAREPOINT_CLIENT_ID`, `SHAREPOINT_TENANT_ID`, `SHAREPOINT_CERTIFICATE_PATH`, `SHAREPOINT_CERTIFICATE_BASE64` and `SHAREPOINT_CERTIFICATE_PASSWORD`.
+
+~> **Security note:** the certificate password is passed to the `m365` CLI as a `--password` process argument during the one-time login, because the CLI has no environment-variable or stdin alternative. For the lifetime of that login process, other local users on the same machine can see it in the process list. Run Terraform on a single-user machine, such as a dedicated CI runner, if that matters in your environment.
+
+## Example Usage
+
+{{ tffile "examples/provider/provider.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
