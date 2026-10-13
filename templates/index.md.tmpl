@@ -18,15 +18,34 @@ npm install -g @pnp/cli-microsoft365
 
 ## Authentication
 
-The provider signs in unattended (app-only) with an Entra ID app registration and a certificate:
+The provider signs in unattended (app-only). It supports three authentication types, chosen with `auth_type`:
 
-1. Register an application in Entra ID and grant it the SharePoint application permissions your configuration needs, for example `Sites.FullControl.All`.
-2. Create a certificate and upload its public key to the app registration.
-3. Configure the provider with the app's client ID, your tenant, and the PFX certificate, either as a file path or inline as base64.
+| `auth_type` | Settings | Typical use |
+|---|---|---|
+| `certificate` (default) | `client_id`, `tenant_id`, and `certificate_path` or `certificate_base64` (plus `certificate_password` if the PFX has one) | Anywhere |
+| `identity` | Optional `client_id` of a user-assigned managed identity | Terraform running on Azure: VMs, Container Apps, Azure Functions, Cloud Shell |
+| `federatedIdentity` | `client_id`, `tenant_id` | GitHub Actions and Azure DevOps pipelines, with no stored secret |
 
-All attributes can also be set through environment variables: `SHAREPOINT_CLIENT_ID`, `SHAREPOINT_TENANT_ID`, `SHAREPOINT_CERTIFICATE_PATH`, `SHAREPOINT_CERTIFICATE_BASE64` and `SHAREPOINT_CERTIFICATE_PASSWORD`.
+Whichever type you use, grant the app registration or managed identity the SharePoint application permissions your configuration needs, for example `Sites.FullControl.All`. Settings that don't apply to the chosen `auth_type` are ignored.
 
-~> **Security note:** the certificate password is passed to the `m365` CLI as a `--password` process argument during the one-time login, because the CLI has no environment-variable or stdin alternative. For the lifetime of that login process, other local users on the same machine can see it in the process list. Run Terraform on a single-user machine, such as a dedicated CI runner, if that matters in your environment.
+All attributes can also be set through environment variables: `SHAREPOINT_AUTH_TYPE`, `SHAREPOINT_CLIENT_ID`, `SHAREPOINT_TENANT_ID`, `SHAREPOINT_CERTIFICATE_PATH`, `SHAREPOINT_CERTIFICATE_BASE64` and `SHAREPOINT_CERTIFICATE_PASSWORD`.
+
+### Certificate
+
+Register an application in Entra ID, upload a certificate's public key to it, and configure the provider with the app's client ID, your tenant, and the PFX certificate as a file path or inline as base64.
+
+The certificate and its password are never passed to the `m365` CLI as command-line arguments. Each is written to a temporary file readable only by the current user, handed to the CLI by path, and deleted right after login.
+
+### Managed identity
+
+Set `auth_type = "identity"`. For a user-assigned identity, set `client_id` to the identity's client ID; leave it unset for the system-assigned identity.
+
+### Federated identity
+
+Set `auth_type = "federatedIdentity"`. The `m365` CLI exchanges the pipeline's OIDC token for an Entra ID token, so no secret is stored anywhere. Add a federated credential to the app registration that trusts your pipeline first.
+
+- **GitHub Actions:** the job needs the `id-token: write` permission. Set `client_id` and `tenant_id`.
+- **Azure DevOps:** run Terraform in an `AzureCLI@2` or `AzurePowerShell@5` task that uses a workload identity federation service connection, and map `SYSTEM_ACCESSTOKEN: $(System.AccessToken)` into the task's environment. `client_id` and `tenant_id` then come from the service connection and can be left unset.
 
 ## Example Usage
 

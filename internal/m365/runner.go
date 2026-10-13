@@ -1,6 +1,6 @@
 // Package m365 wraps the m365 CLI (the Node.js command-line tool from
-// @pnp/cli-microsoft365), handling certificate-based login and running
-// commands against a Microsoft 365 tenant.
+// @pnp/cli-microsoft365), handling app-only login and running commands
+// against a Microsoft 365 tenant.
 package m365
 
 import (
@@ -14,18 +14,25 @@ import (
 	"sync"
 )
 
+// Authentication types supported by Runner, named after the m365 CLI's
+// `login --authType` values they map to.
+const (
+	AuthTypeCertificate       = "certificate"
+	AuthTypeIdentity          = "identity"
+	AuthTypeFederatedIdentity = "federatedIdentity"
+)
+
 // Runner executes m365 CLI commands against a Microsoft 365 tenant using
-// certificate-based Azure AD app-only authentication.
+// app-only authentication: an Entra ID app with a certificate, an Azure
+// managed identity, or workload identity federation from a CI/CD pipeline.
 //
 // Login is performed once per Runner lifetime via sync.Once; subsequent Run
 // and Exec calls reuse the session stored by the m365 CLI (~/.m365rc.json).
-// The certificate is written to a temp file that is removed immediately after
-// login. The certificate password, however, has no argv-free path in the m365
-// CLI (no env var or stdin alternative to --password as of v11.8.0), so it is
-// passed as a process argument during the single login call and is briefly
-// visible to other local users via `ps`/`/proc/<pid>/cmdline` for that
-// process's lifetime. Any occurrence of the password in CLI error output is
-// scrubbed before being returned (see exec below).
+// Secrets never appear on the login command line: a base64 certificate and
+// the certificate password are each written to a private temp file that is
+// removed right after login, and passed to the CLI by path (`@<path>` for the
+// password, which the CLI replaces with the file's contents). Any occurrence
+// of the password in CLI error output is also scrubbed (see exec below).
 //
 // One Runner is shared by every resource in the provider for the lifetime of
 // a single `terraform apply`, and Terraform invokes multiple resources'
@@ -38,6 +45,11 @@ import (
 // Runner launches (see exec) so at most one is ever running at a time,
 // trading a bit of apply-time parallelism for correctness.
 type Runner struct {
+	// AuthType is one of the AuthType* constants.
+	AuthType string
+	// ClientID is the Entra ID app's client ID for certificate and
+	// federated identity auth. For identity auth it is the client ID of a
+	// user-assigned managed identity, or empty to use the system-assigned one.
 	ClientID   string
 	TenantID   string
 	CertPath   string
@@ -61,41 +73,102 @@ func (r *Runner) doLogin(ctx context.Context) error {
 	// Errors from logout are intentionally ignored — there may be no session to clear.
 	_, _ = r.exec(ctx, []string{"logout"})
 
-	certPath := r.CertPath
-
-	if r.CertBase64 != "" {
-		data, err := base64.StdEncoding.DecodeString(r.CertBase64)
-		if err != nil {
-			return fmt.Errorf("decoding certificate base64: %w", err)
-		}
-		tf, err := os.CreateTemp("", "tf-m365-*.pfx")
-		if err != nil {
-			return fmt.Errorf("creating temp cert file: %w", err)
-		}
-		defer func() { _ = os.Remove(tf.Name()) }()
-		if _, err := tf.Write(data); err != nil {
-			_ = tf.Close()
-			return fmt.Errorf("writing temp cert file: %w", err)
-		}
-		if err := tf.Close(); err != nil {
-			return fmt.Errorf("closing temp cert file: %w", err)
-		}
-		certPath = tf.Name()
+	args, cleanup, err := r.loginArgs()
+	defer cleanup()
+	if err != nil {
+		return err
 	}
 
-	args := []string{
-		"login",
-		"--authType", "certificate",
-		"--certificateFile", certPath,
-		"--appId", r.ClientID,
-		"--tenant", r.TenantID,
-	}
-	if r.CertPass != "" {
-		args = append(args, "--password", r.CertPass)
-	}
-
-	_, err := r.exec(ctx, args)
+	_, err = r.exec(ctx, args)
 	return err
+}
+
+// loginArgs builds the `m365 login` arguments for r.AuthType. Secrets are
+// written to temp files; the returned cleanup
+// removes them and must be called even when err is non-nil.
+func (r *Runner) loginArgs() (args []string, cleanup func(), err error) {
+	var tempFiles []string
+	cleanup = func() {
+		for _, f := range tempFiles {
+			_ = os.Remove(f)
+		}
+	}
+	writeTemp := func(pattern string, data []byte) (string, error) {
+		path, err := writeTempFile(pattern, data)
+		if path != "" {
+			tempFiles = append(tempFiles, path)
+		}
+		return path, err
+	}
+
+	switch r.AuthType {
+	case AuthTypeCertificate:
+		certPath := r.CertPath
+		if r.CertBase64 != "" {
+			data, err := base64.StdEncoding.DecodeString(r.CertBase64)
+			if err != nil {
+				return nil, cleanup, fmt.Errorf("decoding certificate base64: %w", err)
+			}
+			if certPath, err = writeTemp("tf-m365-*.pfx", data); err != nil {
+				return nil, cleanup, fmt.Errorf("writing temp cert file: %w", err)
+			}
+		}
+		args = []string{
+			"login",
+			"--authType", AuthTypeCertificate,
+			"--certificateFile", certPath,
+			"--appId", r.ClientID,
+			"--tenant", r.TenantID,
+		}
+		if r.CertPass != "" {
+			passPath, err := writeTemp("tf-m365-pass-*", []byte(r.CertPass))
+			if err != nil {
+				return nil, cleanup, fmt.Errorf("writing temp password file: %w", err)
+			}
+			args = append(args, "--password", "@"+passPath)
+		}
+
+	case AuthTypeIdentity:
+		args = []string{"login", "--authType", AuthTypeIdentity}
+		if r.ClientID != "" {
+			// The CLI takes a user-assigned managed identity's client ID
+			// through --userName.
+			args = append(args, "--userName", r.ClientID)
+		}
+
+	case AuthTypeFederatedIdentity:
+		// The CLI gets the federation token from the CI environment itself
+		// (GitHub Actions or Azure DevOps variables). In an Azure DevOps task
+		// with a service connection, the CLI takes the app and tenant from
+		// the service connection, so they are optional here.
+		args = []string{"login", "--authType", AuthTypeFederatedIdentity}
+		if r.ClientID != "" {
+			args = append(args, "--appId", r.ClientID)
+		}
+		if r.TenantID != "" {
+			args = append(args, "--tenant", r.TenantID)
+		}
+
+	default:
+		return nil, cleanup, fmt.Errorf("unsupported auth type %q", r.AuthType)
+	}
+
+	return args, cleanup, nil
+}
+
+// writeTempFile writes data to a new temp file, readable only by the current
+// user, and returns its path. On a write failure the path is still returned
+// so the caller can remove the file.
+func writeTempFile(pattern string, data []byte) (string, error) {
+	tf, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", err
+	}
+	if _, err := tf.Write(data); err != nil {
+		_ = tf.Close()
+		return tf.Name(), err
+	}
+	return tf.Name(), tf.Close()
 }
 
 // Run logs in (once) then executes an m365 command with --output json,

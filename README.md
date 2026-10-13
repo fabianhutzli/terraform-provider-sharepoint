@@ -1,6 +1,6 @@
 # Terraform Provider for SharePoint
 
-A Terraform provider for managing Microsoft SharePoint Online resources — sites, lists, permissions, site scripts/designs, themes, SPFx solutions, and tenant settings — using certificate-based Azure AD app-only authentication.
+A Terraform provider for managing Microsoft SharePoint Online resources — sites, lists, permissions, site scripts/designs, themes, SPFx solutions, and tenant settings — using app-only authentication with a certificate, an Azure managed identity or workload identity federation.
 
 ## How it works
 
@@ -29,32 +29,56 @@ To run a locally built provider while developing, see [CONTRIBUTING.md](CONTRIBU
 
 ## Authentication
 
-The provider authenticates using an Azure AD app registration with a certificate, via app-only (unattended) authentication — no interactive sign-in.
+The provider signs in unattended (app-only) — no interactive sign-in. `auth_type` picks one of three methods:
 
-1. Register an application in Azure AD (Entra ID) and grant it the SharePoint application permissions your configuration needs (e.g. `Sites.FullControl.All`).
-2. Generate a certificate and upload its public key to the app registration.
-3. Configure the provider with the app's client ID, your tenant ID, and the certificate (as a file path or inline base64), all of which can be set via `provider` block attributes or environment variables:
+- **`certificate`** (default): an Entra ID app registration with a certificate.
+- **`identity`**: an Azure managed identity, for Terraform running on Azure (VMs, Container Apps, Functions, Cloud Shell).
+- **`federatedIdentity`**: workload identity federation from GitHub Actions or Azure DevOps — the pipeline's OIDC token is exchanged for an Entra ID token, so no secret is stored.
+
+Grant the app registration or managed identity the SharePoint application permissions your configuration needs (e.g. `Sites.FullControl.All`). Settings that don't apply to the chosen `auth_type` are ignored. Every attribute can be set in the `provider` block or through an environment variable:
 
 | Attribute | Environment variable | Description |
 |---|---|---|
-| `client_id` | `SHAREPOINT_CLIENT_ID` | Azure AD application (client) ID |
-| `tenant_id` | `SHAREPOINT_TENANT_ID` | Azure AD tenant ID (GUID) or domain, e.g. `contoso.onmicrosoft.com` |
+| `auth_type` | `SHAREPOINT_AUTH_TYPE` | `certificate` (default), `identity` or `federatedIdentity` |
+| `client_id` | `SHAREPOINT_CLIENT_ID` | Entra ID application (client) ID. For `identity`, the client ID of a user-assigned managed identity (leave unset for system-assigned) |
+| `tenant_id` | `SHAREPOINT_TENANT_ID` | Entra ID tenant ID (GUID) or domain, e.g. `contoso.onmicrosoft.com`. Not used for `identity` |
 | `certificate_path` | `SHAREPOINT_CERTIFICATE_PATH` | Absolute path to a PFX certificate file. Mutually exclusive with `certificate_base64` |
 | `certificate_base64` | `SHAREPOINT_CERTIFICATE_BASE64` | Base64-encoded PFX certificate — use for CI/CD where writing a file to disk isn't convenient |
 | `certificate_password` | `SHAREPOINT_CERTIFICATE_PASSWORD` | Password for the PFX certificate. Leave unset if the certificate has none |
 
 ```hcl
+# Certificate
 provider "sharepoint" {
   client_id             = var.sharepoint_client_id
   tenant_id             = var.sharepoint_tenant_id
   certificate_path      = var.sharepoint_certificate_path
   certificate_password  = var.sharepoint_certificate_password
 }
+
+# Managed identity (user-assigned; drop client_id for system-assigned)
+provider "sharepoint" {
+  auth_type = "identity"
+  client_id = var.managed_identity_client_id
+}
+
+# Federated identity (GitHub Actions)
+provider "sharepoint" {
+  auth_type = "federatedIdentity"
+  client_id = var.sharepoint_client_id
+  tenant_id = var.sharepoint_tenant_id
+}
 ```
+
+### Federated identity in CI/CD
+
+First add a federated credential to the app registration that trusts your repository or pipeline. Then:
+
+- **GitHub Actions:** give the job `permissions: id-token: write` and set `client_id` and `tenant_id`.
+- **Azure DevOps:** run Terraform inside an `AzureCLI@2` or `AzurePowerShell@5` task with a workload identity federation service connection, and add `SYSTEM_ACCESSTOKEN: $(System.AccessToken)` to the task's `env`. The `m365` CLI takes `client_id` and `tenant_id` from the service connection, so you can leave them unset.
 
 ### Security note
 
-The certificate password is passed to the `m365` CLI as a `--password` process argument during the one-time login the provider performs. The `m365` CLI (as of v11.8.0) has no environment-variable or stdin alternative for this flag, so for the brief lifetime of that login process, the password is visible to other local users on the same machine via `ps` or `/proc/<pid>/cmdline`. This provider does not log or persist the password itself, and redacts it from any error output the CLI returns. If this residual exposure is a concern for your environment, run Terraform on a single-tenant machine (e.g. a dedicated CI runner) rather than a shared multi-user host.
+The certificate and its password are never passed to the `m365` CLI as command-line arguments, where other local users could read them from the process list. The provider writes them to temporary files readable only by the current user, passes them to the CLI by path (`@<path>` for the password, which the CLI replaces with the file's contents), and deletes them right after the one-time login. The password is also redacted from any error output the CLI returns.
 
 ## Usage
 

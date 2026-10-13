@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Provider: `auth_type` attribute (`SHAREPOINT_AUTH_TYPE`) to choose between `certificate` (the default, so existing configurations keep working unchanged), `identity` and `federatedIdentity` authentication.
+- Provider: Azure managed identity authentication (`auth_type = "identity"`), system-assigned or user-assigned via `client_id`.
+- Provider: workload identity federation from GitHub Actions or Azure DevOps (`auth_type = "federatedIdentity"`), with no stored secret.
+
+### Security
+
+- The certificate password is no longer passed to the `m365` CLI as a command-line argument, where other local users could see it in the process list. It is written to a temporary file readable only by the current user and passed by path.
+
 ## [0.1.0]
 
 Initial release.
