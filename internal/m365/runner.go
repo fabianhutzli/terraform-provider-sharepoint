@@ -7,9 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -177,7 +181,96 @@ func (r *Runner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	if err := r.Login(ctx); err != nil {
 		return nil, err
 	}
-	return r.exec(ctx, append(args, "--output", "json"))
+	jsonArgs := append(slices.Clip(args), "--output", "json")
+	out, err := r.exec(ctx, jsonArgs)
+	if err != nil {
+		return nil, r.withRequestDetails(ctx, jsonArgs, err)
+	}
+	return out, nil
+}
+
+// withRequestDetails adds the failed request's HTTP status and SharePoint
+// error code to err, for IsNotFound. The CLI's error message can't be relied
+// on for this: SharePoint translates it into the site's language, and several
+// missing objects don't report "not found" at all. The status and code are
+// only printed with --debug, so a failed command is run again with it.
+//
+// That is only safe for read-only commands, so anything but get and list
+// keeps its plain error. --debug output includes the access token, so only the
+// status and code are kept from it.
+func (r *Runner) withRequestDetails(ctx context.Context, args []string, err error) error {
+	verb := commandVerb(args)
+	if (verb != "get" && verb != "list") || ctx.Err() != nil {
+		return err
+	}
+	_, stderr, debugErr := r.run(ctx, append(slices.Clip(args), "--debug"))
+	if debugErr == nil {
+		return err
+	}
+	status, code := parseRequestError(stderr)
+	if status == 0 {
+		return err
+	}
+	return &commandError{message: err.Error(), verb: verb, status: status, code: code}
+}
+
+// commandVerb returns the last word of an m365 command, e.g. "get" for
+// "spo list view get --webUrl ...".
+func commandVerb(args []string) string {
+	verb := ""
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			break
+		}
+		verb = arg
+	}
+	return verb
+}
+
+var (
+	requestStatusPattern = regexp.MustCompile(`"status": (\d+)`)
+	requestCodePattern   = regexp.MustCompile(`"code": "([^"]*)"`)
+)
+
+// parseRequestError extracts the HTTP status and SharePoint error code of the
+// last failed request from the CLI's --debug output. status is 0 if no request
+// failed, as when the CLI itself raises the error after a successful response.
+func parseRequestError(debugOutput []byte) (status int, code string) {
+	i := bytes.LastIndex(debugOutput, []byte("Request error:"))
+	if i < 0 {
+		return 0, ""
+	}
+	failed := debugOutput[i:]
+	if m := requestStatusPattern.FindSubmatch(failed); m != nil {
+		status, _ = strconv.Atoi(string(m[1]))
+	}
+	if m := requestCodePattern.FindSubmatch(failed); m != nil {
+		code = string(m[1])
+	}
+	return status, code
+}
+
+// commandError is a failed read-only command whose HTTP status and SharePoint
+// error code are known. Its message is the CLI's, without any --debug output.
+type commandError struct {
+	message string
+	verb    string
+	status  int
+	code    string
+}
+
+func (e *commandError) Error() string { return e.message }
+
+// argumentExceptionCode is SharePoint's code for System.ArgumentException.
+const argumentExceptionCode = "-2147024809,"
+
+// isMissing reports whether the request failed because the object doesn't
+// exist. Fields, views and role definitions answer a get for an unknown ID
+// with a 400 ArgumentException rather than a 404. A get has no other arguments
+// to reject than the ID and the site, so here it means the ID is unknown.
+func (e *commandError) isMissing() bool {
+	return e.status == 404 ||
+		(e.status == 400 && e.verb == "get" && strings.HasPrefix(e.code, argumentExceptionCode))
 }
 
 // Exec logs in (once) then executes an m365 command that produces no meaningful
@@ -191,19 +284,11 @@ func (r *Runner) Exec(ctx context.Context, args ...string) error {
 }
 
 func (r *Runner) exec(ctx context.Context, args []string) ([]byte, error) {
-	// Only one m365 CLI process at a time — see the Runner doc comment.
-	r.execMu.Lock()
-	defer r.execMu.Unlock()
-
-	cmd := exec.CommandContext(ctx, "m365", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
+	stdout, stderr, err := r.run(ctx, args)
+	if err != nil {
+		msg := strings.TrimSpace(string(stderr))
 		if msg == "" {
-			msg = strings.TrimSpace(stdout.String())
+			msg = strings.TrimSpace(string(stdout))
 		}
 		if msg == "" {
 			msg = err.Error()
@@ -211,7 +296,21 @@ func (r *Runner) exec(ctx context.Context, args []string) ([]byte, error) {
 		msg = redactSecret(msg, r.CertPass)
 		return nil, fmt.Errorf("%s", msg)
 	}
-	return bytes.TrimSpace(stdout.Bytes()), nil
+	return bytes.TrimSpace(stdout), nil
+}
+
+// run launches one m365 process and returns its raw output.
+func (r *Runner) run(ctx context.Context, args []string) (stdout, stderr []byte, err error) {
+	// Only one m365 CLI process at a time — see the Runner doc comment.
+	r.execMu.Lock()
+	defer r.execMu.Unlock()
+
+	cmd := exec.CommandContext(ctx, "m365", args...)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err = cmd.Run()
+	return outBuf.Bytes(), errBuf.Bytes(), err
 }
 
 // redactSecret replaces any occurrence of secret in msg with a placeholder.
@@ -230,11 +329,18 @@ func IsNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
+	var cmdErr *commandError
+	if errors.As(err, &cmdErr) && cmdErr.isMissing() {
+		return true
+	}
+	// Commands that can't be run again (see withRequestDetails), and errors
+	// the CLI raises itself, which are always in English.
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "couldn't find") ||
 		strings.Contains(msg, "could not find") ||
 		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no navigation node found") ||
 		strings.Contains(msg, "404")
 }
 

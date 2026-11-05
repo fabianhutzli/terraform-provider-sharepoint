@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Resources deleted outside Terraform are now recognized on sites in any language, and missing fields, list views, permission levels and navigation nodes are recognized at all. Refresh used to fail with an error instead of removing them from state. This relies on the HTTP status and SharePoint error code rather than the translated message.
 - `sharepoint_site_group`: with `permission_level` unset in config, changing `description` no longer plans a replacement of the group.
 
 ### Changed
