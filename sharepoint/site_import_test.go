@@ -330,3 +330,121 @@ func TestListBaseTemplateNamesCoverSchema(t *testing.T) {
 		t.Errorf("got %d template names, want %d", len(names), len(accepted))
 	}
 }
+
+func TestFindNavigationParent(t *testing.T) {
+	const tree = `[
+		{"Id":1,"Children":[]},
+		{"Id":2,"Children":[{"Id":3,"Children":[{"Id":4,"Children":[]}]}]}
+	]`
+	var nodes []navigationTreeNode
+	if err := json.Unmarshal([]byte(tree), &nodes); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		id         int64
+		wantParent string
+		wantFound  bool
+	}{
+		{name: "top level", id: 1, wantFound: true},
+		{name: "child", id: 3, wantParent: "2", wantFound: true},
+		{name: "grandchild", id: 4, wantParent: "3", wantFound: true},
+		{name: "absent", id: 9},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent, found := findNavigationParent(nodes, tt.id, "")
+			if parent != tt.wantParent || found != tt.wantFound {
+				t.Errorf("findNavigationParent(%d) = %q, %v, want %q, %v", tt.id, parent, found, tt.wantParent, tt.wantFound)
+			}
+		})
+	}
+}
+
+func TestSplitGroupMemberImportID(t *testing.T) {
+	const url = "https://contoso.sharepoint.com/sites/hr"
+	tests := []struct {
+		name      string
+		id        string
+		wantGroup string
+		wantEntra string
+		wantErr   bool
+	}{
+		{name: "guid", id: url + "|HR Editors|00000000-0000-0000-0000-000000000000", wantGroup: "HR Editors", wantEntra: "00000000-0000-0000-0000-000000000000"},
+		{name: "name", id: url + "|HR Editors|HR Leads", wantGroup: "HR Editors", wantEntra: "HR Leads"},
+		{name: "entra name with separator", id: url + "|HR Editors|Leads|EU", wantGroup: "HR Editors", wantEntra: "Leads|EU"},
+		{name: "missing entra group", id: url + "|HR Editors", wantErr: true},
+		{name: "empty entra group", id: url + "|HR Editors|", wantErr: true},
+		{name: "empty group", id: url + "||HR Leads", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURL, group, entra, err := splitGroupMemberImportID(tt.id)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if gotURL != url || group != tt.wantGroup || entra != tt.wantEntra {
+				t.Errorf("got %q, %q, %q", gotURL, group, entra)
+			}
+		})
+	}
+}
+
+func TestCheckEntraGroupMember(t *testing.T) {
+	const entraID = "aaaaaaaa-0000-0000-0000-000000000000"
+	members := []groupMemberResponse{
+		{Title: "Pat Doe", LoginName: "i:0#.f|membership|pat@contoso.com", PrincipalType: 1},
+		{Title: "HR Leads", LoginName: "c:0t.c|tenant|" + entraID, PrincipalType: 4},
+		{Title: "Finance", LoginName: "i:0#.f|membership|finance@contoso.com", PrincipalType: 1},
+		{Title: "Team", LoginName: "c:0o.c|federateddirectoryclaimprovider|bbbbbbbb-0000-0000-0000-000000000000", PrincipalType: 4},
+		{Title: "Finance", LoginName: "c:0t.c|tenant|cccccccc-0000-0000-0000-000000000000", PrincipalType: 4},
+	}
+
+	tests := []struct {
+		name    string
+		id      string
+		entra   string
+		members []groupMemberResponse
+		wantErr string
+	}{
+		{name: "by id", id: entraID, members: members},
+		{name: "by id, different case", id: strings.ToUpper(entraID), members: members},
+		{name: "by name", entra: "hr leads", members: members},
+		{name: "microsoft 365 group", id: "bbbbbbbb-0000-0000-0000-000000000000", members: members},
+		{name: "group sharing a name with a user", entra: "Finance", members: members},
+		{name: "user", entra: "Pat Doe", members: members, wantErr: "user"},
+		{name: "absent", entra: "Nobody", members: members, wantErr: "no such"},
+		{name: "empty group", id: entraID, wantErr: "no such"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkEntraGroupMember(tt.members, tt.id, tt.entra)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEntraGroupGUIDPattern(t *testing.T) {
+	for value, want := range map[string]bool{
+		"00000000-0000-0000-0000-000000000000": true,
+		"AAAAAAAA-0000-0000-0000-000000000000": true,
+		"HR Leads":                             false,
+		"00000000-0000-0000-0000":              false,
+	} {
+		if got := entraGroupGUIDPattern.MatchString(value); got != want {
+			t.Errorf("MatchString(%q) = %v, want %v", value, got, want)
+		}
+	}
+}

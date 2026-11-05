@@ -22,6 +22,7 @@ import (
 )
 
 var _ resource.Resource = &NavigationNodeResource{}
+var _ resource.ResourceWithImportState = &NavigationNodeResource{}
 
 // NavigationNodeResource manages a node in a SharePoint site's quick launch
 // or top navigation bar.
@@ -88,6 +89,9 @@ func (r *NavigationNodeResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Optional:    true,
 				Computed:    true,
 				Description: "URL the node links to. Leave unset to create a linkless label.",
+				// Without this, a change to another attribute makes an unset url
+				// unknown, and Update would send it as an empty string.
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"is_external": schema.BoolAttribute{
 				Optional:    true,
@@ -292,7 +296,99 @@ func (r *NavigationNodeResource) Delete(ctx context.Context, req resource.Delete
 	}
 }
 
+// ---- Import ----
+
+// ImportState imports an existing node by "<web_url>|<id>". Neither location
+// nor parent_node_id is returned for a node, so both come from finding it in
+// the site's navigation trees. open_in_new_window isn't returned at all and
+// keeps its default.
+func (r *NavigationNodeResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	webURL, nodeID, err := splitNumericImportID(req.ID, "id")
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	if r.runner == nil {
+		resp.Diagnostics.AddError("Provider not configured", "The provider must be configured before resources can be imported.")
+		return
+	}
+
+	nodeJSON, err := r.runner.Run(ctx, "spo", "navigation", "node", "get",
+		"--webUrl", webURL,
+		"--id", strconv.FormatInt(nodeID, 10),
+	)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read navigation node", err.Error())
+		return
+	}
+	var node navigationNodeResponse
+	if err := json.Unmarshal(nodeJSON, &node); err != nil {
+		resp.Diagnostics.AddError("Failed to parse navigation node response",
+			fmt.Sprintf("%s\nJSON: %s", err.Error(), string(nodeJSON)))
+		return
+	}
+
+	state := NavigationNodeModel{
+		WebURL:          types.StringValue(webURL),
+		ParentNodeID:    types.StringNull(),
+		IsExternal:      types.BoolValue(node.IsExternal),
+		OpenInNewWindow: types.BoolValue(false),
+	}
+	for _, location := range []string{"QuickLaunch", "TopNavigationBar"} {
+		treeJSON, err := r.runner.Run(ctx, "spo", "navigation", "node", "list", "--webUrl", webURL, "--location", location)
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to list navigation nodes", err.Error())
+			return
+		}
+		var tree []navigationTreeNode
+		if err := json.Unmarshal(treeJSON, &tree); err != nil {
+			resp.Diagnostics.AddError("Failed to parse navigation node list",
+				fmt.Sprintf("%s\nJSON: %s", err.Error(), string(treeJSON)))
+			return
+		}
+		if parentID, found := findNavigationParent(tree, nodeID, ""); found {
+			state.Location = types.StringValue(location)
+			if parentID != "" {
+				state.ParentNodeID = types.StringValue(parentID)
+			}
+			break
+		}
+	}
+	if state.Location.IsNull() {
+		resp.Diagnostics.AddError("Cannot import navigation node",
+			fmt.Sprintf("Node %d is not in the site's QuickLaunch or TopNavigationBar, the only navigation trees this resource can manage.", nodeID))
+		return
+	}
+
+	resp.Diagnostics.Append(applyNavigationNodeResponse(ctx, &state, &node)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
+}
+
 // ---- helpers ----
+
+// navigationTreeNode is the part of a node returned by m365 spo navigation
+// node list needed to walk the tree.
+type navigationTreeNode struct {
+	Id       int64                `json:"Id"`
+	Children []navigationTreeNode `json:"Children"`
+}
+
+// findNavigationParent looks for a node in a navigation tree, returning the
+// ID of its parent, which is empty for a top-level node.
+func findNavigationParent(nodes []navigationTreeNode, id int64, parentID string) (string, bool) {
+	for _, node := range nodes {
+		if node.Id == id {
+			return parentID, true
+		}
+		if found, ok := findNavigationParent(node.Children, id, strconv.FormatInt(node.Id, 10)); ok {
+			return found, true
+		}
+	}
+	return "", false
+}
 
 // applyNavigationNodeResponse copies a parsed navigationNodeResponse into
 // model. IsExternal is deliberately NOT copied from the response: SharePoint

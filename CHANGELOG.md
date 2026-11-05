@@ -12,12 +12,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Provider: Azure managed identity authentication (`auth_type = "identity"`), system-assigned or user-assigned via `client_id`.
 - Provider: workload identity federation from GitHub Actions or Azure DevOps (`auth_type = "federatedIdentity"`), with no stored secret.
 - `sharepoint_site`, `sharepoint_associated_site` and `sharepoint_hub_site` can be imported, using the site's URL as the import ID. Importing needs SharePoint admin access, because it reads the site's admin properties. `site_design` can't be read back, so it is recorded as `Topic`.
-- `sharepoint_permission_level` (custom levels only), `sharepoint_site_group` and `sharepoint_list` can be imported.
+- `sharepoint_permission_level` (custom levels only), `sharepoint_site_group`, `sharepoint_list`, `sharepoint_navigation_node` and `sharepoint_site_group_member` (Entra groups only) can be imported.
 
 ### Fixed
 
 - Resources deleted outside Terraform are now recognized on sites in any language, and missing fields, list views, permission levels and navigation nodes are recognized at all. Refresh used to fail with an error instead of removing them from state. This relies on the HTTP status and SharePoint error code rather than the translated message.
 - `sharepoint_site_group`: with `permission_level` unset in config, changing `description` no longer plans a replacement of the group.
+
+- `sharepoint_navigation_node`: with `url` unset in config, changing another attribute no longer sends an empty URL.
 
 ### Changed
 
