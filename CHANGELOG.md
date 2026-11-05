@@ -12,6 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Provider: Azure managed identity authentication (`auth_type = "identity"`), system-assigned or user-assigned via `client_id`.
 - Provider: workload identity federation from GitHub Actions or Azure DevOps (`auth_type = "federatedIdentity"`), with no stored secret.
 - `sharepoint_site`, `sharepoint_associated_site` and `sharepoint_hub_site` can be imported, using the site's URL as the import ID. Importing needs SharePoint admin access, because it reads the site's admin properties. `site_design` can't be read back, so it is recorded as `Topic`.
+- `sharepoint_permission_level` (custom levels only), `sharepoint_site_group` and `sharepoint_list` can be imported.
+
+### Fixed
+
+- `sharepoint_site_group`: with `permission_level` unset in config, changing `description` no longer plans a replacement of the group.
 
 ### Changed
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/fabianhutzli/terraform-provider-sharepoint/internal/m365"
@@ -48,6 +49,33 @@ func siteURLFromImportID(id string) (string, error) {
 		return "", fmt.Errorf(`expected the site's full URL, e.g. "https://contoso.sharepoint.com/sites/hr", got %q`, id)
 	}
 	return strings.TrimRight(id, "/"), nil
+}
+
+// splitImportID splits a "<site_url>|<id>" import ID. idName names the second
+// part in error messages.
+func splitImportID(id, idName string) (siteURL, rest string, err error) {
+	url, rest, ok := strings.Cut(id, "|")
+	if !ok || rest == "" {
+		return "", "", fmt.Errorf(`expected "<site_url>|<%s>", e.g. "https://contoso.sharepoint.com/sites/hr|<%s>", got %q`, idName, idName, id)
+	}
+	siteURL, err = siteURLFromImportID(url)
+	if err != nil {
+		return "", "", err
+	}
+	return siteURL, rest, nil
+}
+
+// splitNumericImportID is splitImportID for a second part that must be a number.
+func splitNumericImportID(id, idName string) (string, int64, error) {
+	siteURL, rest, err := splitImportID(id, idName)
+	if err != nil {
+		return "", 0, err
+	}
+	n, err := strconv.ParseInt(rest, 10, 64)
+	if err != nil {
+		return "", 0, fmt.Errorf("expected %s to be a number, got %q", idName, rest)
+	}
+	return siteURL, n, nil
 }
 
 // siteTypeFromTemplate maps a site's web template to a site_type value. It

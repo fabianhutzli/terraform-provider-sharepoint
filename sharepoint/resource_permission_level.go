@@ -17,6 +17,7 @@ import (
 )
 
 var _ resource.Resource = &PermissionLevelResource{}
+var _ resource.ResourceWithImportState = &PermissionLevelResource{}
 
 // PermissionLevelResource manages a custom permission level (role
 // definition) on a SharePoint Online site.
@@ -229,6 +230,59 @@ func (r *PermissionLevelResource) Delete(ctx context.Context, req resource.Delet
 	}
 }
 
+// ---- Import ----
+
+// ImportState imports an existing custom permission level by
+// "<site_url>|<role_definition_id>". Built-in levels are refused: this
+// resource would try to delete them on destroy or replacement.
+func (r *PermissionLevelResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	siteURL, roleID, err := splitNumericImportID(req.ID, "role_definition_id")
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	if r.runner == nil {
+		resp.Diagnostics.AddError("Provider not configured", "The provider must be configured before resources can be imported.")
+		return
+	}
+
+	roleJSON, err := r.runner.Run(ctx, "spo", "roledefinition", "get",
+		"--webUrl", siteURL,
+		"--id", fmt.Sprintf("%d", roleID),
+	)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read permission level", err.Error())
+		return
+	}
+
+	var roleDef roleDefinitionResponse
+	if err := json.Unmarshal(roleJSON, &roleDef); err != nil {
+		resp.Diagnostics.AddError("Failed to parse role definition response",
+			fmt.Sprintf("%s\nJSON: %s", err.Error(), string(roleJSON)))
+		return
+	}
+	if !roleDef.isCustom() {
+		resp.Diagnostics.AddError("Cannot import permission level",
+			fmt.Sprintf("%q is a built-in permission level; only custom permission levels can be managed by this resource.", roleDef.Name))
+		return
+	}
+
+	permsSet, diags := types.SetValueFrom(ctx, types.StringType, roleDef.BasePermissionsValue)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, PermissionLevelModel{
+		ID:               types.StringValue(fmt.Sprintf("%s|%d", siteURL, roleID)),
+		SiteURL:          types.StringValue(siteURL),
+		Name:             types.StringValue(roleDef.Name),
+		Description:      types.StringValue(roleDef.Description),
+		BasePermissions:  permsSet,
+		RoleDefinitionID: types.Int64Value(roleID),
+	})...)
+}
+
 // roleDefinitionResponse matches the JSON returned by m365 spo roledefinition get/list.
 // BasePermissionsValue is added by the CLI's setFriendlyPermissions() call and contains
 // the parsed list of permission flag names derived from the BasePermissions bitmask.
@@ -237,6 +291,13 @@ type roleDefinitionResponse struct {
 	Name                 string   `json:"Name"`
 	Description          string   `json:"Description"`
 	BasePermissionsValue []string `json:"BasePermissionsValue"`
+	RoleTypeKind         int      `json:"RoleTypeKind"`
+}
+
+// isCustom reports whether this is a user-created permission level.
+// SharePoint's built-in levels all have a non-zero RoleTypeKind.
+func (r *roleDefinitionResponse) isCustom() bool {
+	return r.RoleTypeKind == 0
 }
 
 // findRoleDefinitionByName lists all role definitions on the site and returns the one

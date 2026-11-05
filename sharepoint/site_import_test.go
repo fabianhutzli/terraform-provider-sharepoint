@@ -211,3 +211,122 @@ func TestHubSiteModel(t *testing.T) {
 		t.Errorf("HubSiteID = %s", got.HubSiteID)
 	}
 }
+
+func TestSplitImportID(t *testing.T) {
+	tests := []struct {
+		name     string
+		id       string
+		wantURL  string
+		wantRest string
+		wantErr  bool
+	}{
+		{name: "url and id", id: "https://contoso.sharepoint.com/sites/hr|abc", wantURL: "https://contoso.sharepoint.com/sites/hr", wantRest: "abc"},
+		{name: "trailing slash is stripped", id: "https://contoso.sharepoint.com/sites/hr/|abc", wantURL: "https://contoso.sharepoint.com/sites/hr", wantRest: "abc"},
+		{name: "no separator", id: "https://contoso.sharepoint.com/sites/hr", wantErr: true},
+		{name: "empty id", id: "https://contoso.sharepoint.com/sites/hr|", wantErr: true},
+		{name: "not a url", id: "hr|abc", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURL, gotRest, err := splitImportID(tt.id, "list_id")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("splitImportID(%q) error = %v, wantErr %v", tt.id, err, tt.wantErr)
+			}
+			if gotURL != tt.wantURL || gotRest != tt.wantRest {
+				t.Errorf("splitImportID(%q) = %q, %q, want %q, %q", tt.id, gotURL, gotRest, tt.wantURL, tt.wantRest)
+			}
+		})
+	}
+}
+
+func TestSplitNumericImportID(t *testing.T) {
+	url, n, err := splitNumericImportID("https://contoso.sharepoint.com/sites/hr|1073741829", "role_definition_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if url != "https://contoso.sharepoint.com/sites/hr" || n != 1073741829 {
+		t.Errorf("got %q, %d", url, n)
+	}
+
+	_, _, err = splitNumericImportID("https://contoso.sharepoint.com/sites/hr|Owners", "group_id")
+	if err == nil || !strings.Contains(err.Error(), "group_id") {
+		t.Errorf("error = %v, want one naming group_id", err)
+	}
+}
+
+func TestRoleDefinitionIsCustom(t *testing.T) {
+	for _, tt := range []struct {
+		kind int
+		want bool
+	}{{0, true}, {1, false}, {2, false}, {5, false}, {6, false}} {
+		r := roleDefinitionResponse{RoleTypeKind: tt.kind}
+		if got := r.isCustom(); got != tt.want {
+			t.Errorf("RoleTypeKind %d: isCustom() = %v, want %v", tt.kind, got, tt.want)
+		}
+	}
+}
+
+func TestGroupPermissionLevel(t *testing.T) {
+	const web = `{"RoleAssignments":[
+		{"Member":{"Id":3},"RoleDefinitionBindings":[{"Name":"Full Control","Hidden":false}]},
+		{"Member":{"Id":4},"RoleDefinitionBindings":[{"Name":"Limited Access","Hidden":true}]},
+		{"Member":{"Id":5},"RoleDefinitionBindings":[{"Name":"Limited Access","Hidden":true},{"Name":"Read","Hidden":false}]},
+		{"Member":{"Id":6},"RoleDefinitionBindings":[{"Name":"Read","Hidden":false},{"Name":"Edit","Hidden":false}]}
+	]}`
+	var w webRoleAssignmentsResponse
+	if err := json.Unmarshal([]byte(web), &w); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		groupID int64
+		want    string
+		wantErr string
+	}{
+		{name: "one level", groupID: 3, want: "Full Control"},
+		{name: "only a hidden level", groupID: 4, want: ""},
+		{name: "hidden level is ignored", groupID: 5, want: "Read"},
+		{name: "no assignment", groupID: 99, want: ""},
+		{name: "several levels", groupID: 6, wantErr: "Read, Edit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := w.groupPermissionLevel(tt.groupID)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("groupPermissionLevel(%d) = %q, want %q", tt.groupID, got, tt.want)
+			}
+		})
+	}
+}
+
+// Every value base_template accepts has to be importable, or a list created
+// by this provider couldn't be imported back.
+func TestListBaseTemplateNamesCoverSchema(t *testing.T) {
+	accepted := []string{
+		"Announcements", "Contacts", "CustomGrid", "DataSources", "DiscussionBoard", "DocumentLibrary",
+		"Events", "GanttTasks", "GenericList", "IssuesTracking", "Links", "NoCodeWorkflows",
+		"PictureLibrary", "Survey", "Tasks", "WebPageLibrary", "WorkflowHistory", "WorkflowProcess", "XmlForm",
+	}
+	names := map[string]bool{}
+	for _, name := range listBaseTemplateNames {
+		names[name] = true
+	}
+	for _, name := range accepted {
+		if !names[name] {
+			t.Errorf("base_template %q has no template code", name)
+		}
+	}
+	if len(names) != len(accepted) {
+		t.Errorf("got %d template names, want %d", len(names), len(accepted))
+	}
+}

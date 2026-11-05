@@ -22,6 +22,7 @@ import (
 )
 
 var _ resource.Resource = &ListResource{}
+var _ resource.ResourceWithImportState = &ListResource{}
 
 // ListResource manages a SharePoint list or library using the M365 CLI
 // (m365 spo list add / get / set / remove). Unlike sharepoint_tenant_settings,
@@ -458,7 +459,78 @@ func (r *ListResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 	}
 }
 
+// ---- Import ----
+
+// ImportState imports an existing list by "<web_url>|<list_id>". It records
+// base_template, which Read doesn't refresh and which would otherwise plan a
+// replacement; Read then fills in every other attribute from the list's ID.
+func (r *ListResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	webURL, listID, err := splitImportID(req.ID, "list_id")
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	if r.runner == nil {
+		resp.Diagnostics.AddError("Provider not configured", "The provider must be configured before resources can be imported.")
+		return
+	}
+
+	out, err := r.runner.Run(ctx, "spo", "list", "get",
+		"--webUrl", webURL,
+		"--id", listID,
+		"--properties", "BaseTemplate",
+	)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read list", err.Error())
+		return
+	}
+	var list struct {
+		BaseTemplate int64 `json:"BaseTemplate"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		resp.Diagnostics.AddError("Failed to parse list response",
+			fmt.Sprintf("%s\nJSON: %s", err.Error(), string(out)))
+		return
+	}
+	baseTemplate, ok := listBaseTemplateNames[list.BaseTemplate]
+	if !ok {
+		resp.Diagnostics.AddError("Cannot import list",
+			fmt.Sprintf("List template %d is not supported; only the templates accepted by base_template can be imported.", list.BaseTemplate))
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, ListModel{
+		ID:           types.StringValue(listID),
+		WebURL:       types.StringValue(webURL),
+		BaseTemplate: types.StringValue(baseTemplate),
+	})...)
+}
+
 // ---- helpers ----
+
+// listBaseTemplateNames maps the BaseTemplate code SharePoint reports to its
+// base_template value, matching the CLI's ListTemplateType enum.
+var listBaseTemplateNames = map[int64]string{
+	100:  "GenericList",
+	101:  "DocumentLibrary",
+	102:  "Survey",
+	103:  "Links",
+	104:  "Announcements",
+	105:  "Contacts",
+	106:  "Events",
+	107:  "Tasks",
+	108:  "DiscussionBoard",
+	109:  "PictureLibrary",
+	110:  "DataSources",
+	115:  "XmlForm",
+	117:  "NoCodeWorkflows",
+	118:  "WorkflowProcess",
+	119:  "WebPageLibrary",
+	120:  "CustomGrid",
+	140:  "WorkflowHistory",
+	150:  "GanttTasks",
+	1100: "IssuesTracking",
+}
 
 // buildListPropertyArgs turns every non-null, non-unknown field of plan into
 // a --flag value pair using listPropertyFields, filtered by createOK (true

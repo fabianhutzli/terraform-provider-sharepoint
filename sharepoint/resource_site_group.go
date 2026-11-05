@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/fabianhutzli/terraform-provider-sharepoint/internal/m365"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -15,6 +16,7 @@ import (
 )
 
 var _ resource.Resource = &SiteGroupResource{}
+var _ resource.ResourceWithImportState = &SiteGroupResource{}
 
 // SiteGroupResource manages a SharePoint Online site group and its assigned
 // permission level.
@@ -67,10 +69,16 @@ func (r *SiteGroupResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 				Description: "Description of the site group. Can be updated in-place.",
 			},
 			"permission_level": schema.StringAttribute{
-				Optional:      true,
-				Computed:      true,
-				Description:   "Name of the permission level (role definition) to assign to this group, e.g. Contribute, Read, or a custom level name. Changing this replaces the resource.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Optional:    true,
+				Computed:    true,
+				Description: "Name of the permission level (role definition) to assign to this group, e.g. Contribute, Read, or a custom level name. Changing this replaces the resource.",
+				// UseStateForUnknown has to run first: when this is unset in config,
+				// any other change makes it unknown, which RequiresReplace would
+				// otherwise treat as a change and delete the group.
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"group_id": schema.Int64Attribute{
 				Computed:      true,
@@ -241,6 +249,104 @@ func (r *SiteGroupResource) Delete(ctx context.Context, req resource.DeleteReque
 	if err != nil && !m365.IsNotFound(err) {
 		resp.Diagnostics.AddError("Failed to remove site group", err.Error())
 	}
+}
+
+// ---- Import ----
+
+// ImportState imports an existing site group by "<site_url>|<group_id>".
+// permission_level isn't returned by spo group get, so it comes from the
+// web's role assignments.
+func (r *SiteGroupResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	siteURL, groupID, err := splitNumericImportID(req.ID, "group_id")
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	if r.runner == nil {
+		resp.Diagnostics.AddError("Provider not configured", "The provider must be configured before resources can be imported.")
+		return
+	}
+
+	groupJSON, err := r.runner.Run(ctx, "spo", "group", "get",
+		"--webUrl", siteURL,
+		"--id", fmt.Sprintf("%d", groupID),
+	)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read site group", err.Error())
+		return
+	}
+	var group siteGroupResponse
+	if err := json.Unmarshal(groupJSON, &group); err != nil {
+		resp.Diagnostics.AddError("Failed to parse site group response",
+			fmt.Sprintf("%s\nJSON: %s", err.Error(), string(groupJSON)))
+		return
+	}
+
+	webJSON, err := r.runner.Run(ctx, "spo", "web", "get", "--url", siteURL, "--withPermissions")
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read site permissions", err.Error())
+		return
+	}
+	var web webRoleAssignmentsResponse
+	if err := json.Unmarshal(webJSON, &web); err != nil {
+		resp.Diagnostics.AddError("Failed to parse site permissions response", err.Error())
+		return
+	}
+	permissionLevel, err := web.groupPermissionLevel(groupID)
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot import site group", err.Error())
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, SiteGroupModel{
+		ID:              types.StringValue(fmt.Sprintf("%s|%d", siteURL, groupID)),
+		SiteURL:         types.StringValue(siteURL),
+		Name:            types.StringValue(group.Title),
+		Description:     types.StringValue(group.Description),
+		PermissionLevel: types.StringValue(permissionLevel),
+		GroupID:         types.Int64Value(groupID),
+	})...)
+}
+
+// webRoleAssignmentsResponse matches the part of the JSON returned by
+// `m365 spo web get --withPermissions` that lists who holds which roles.
+type webRoleAssignmentsResponse struct {
+	RoleAssignments []struct {
+		Member struct {
+			Id int64 `json:"Id"`
+		} `json:"Member"`
+		RoleDefinitionBindings []struct {
+			Name   string `json:"Name"`
+			Hidden bool   `json:"Hidden"`
+		} `json:"RoleDefinitionBindings"`
+	} `json:"RoleAssignments"`
+}
+
+// groupPermissionLevel returns the permission level assigned to a group on
+// the web, or "" if it has none, which is what Create stores for a group with
+// no permission_level. Hidden levels such as Limited Access are set by
+// SharePoint itself and don't count. A group holding several levels is an
+// error, because permission_level can only represent one and recording the
+// wrong one could plan a replacement of the group.
+func (w *webRoleAssignmentsResponse) groupPermissionLevel(groupID int64) (string, error) {
+	var levels []string
+	for _, assignment := range w.RoleAssignments {
+		if assignment.Member.Id != groupID {
+			continue
+		}
+		for _, binding := range assignment.RoleDefinitionBindings {
+			if !binding.Hidden {
+				levels = append(levels, binding.Name)
+			}
+		}
+	}
+	switch len(levels) {
+	case 0:
+		return "", nil
+	case 1:
+		return levels[0], nil
+	}
+	return "", fmt.Errorf("this group has %d permission levels (%s), but sharepoint_site_group can only manage one", len(levels), strings.Join(levels, ", "))
 }
 
 // siteGroupResponse matches the JSON returned by m365 spo group add/get.
