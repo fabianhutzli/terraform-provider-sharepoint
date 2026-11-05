@@ -11,6 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Provider: `auth_type` attribute (`SHAREPOINT_AUTH_TYPE`) to choose between `certificate` (the default, so existing configurations keep working unchanged), `identity` and `federatedIdentity` authentication.
 - Provider: Azure managed identity authentication (`auth_type = "identity"`), system-assigned or user-assigned via `client_id`.
 - Provider: workload identity federation from GitHub Actions or Azure DevOps (`auth_type = "federatedIdentity"`), with no stored secret.
+- `sharepoint_site`, `sharepoint_associated_site` and `sharepoint_hub_site` can be imported, using the site's URL as the import ID. Importing needs SharePoint admin access, because it reads the site's admin properties. `site_design` can't be read back, so it is recorded as `Topic`.
+
+### Changed
+
+- `sharepoint_site`, `sharepoint_associated_site`: changing `title` now renames the site in place instead of replacing it.
+- `sharepoint_site`, `sharepoint_associated_site`, `sharepoint_hub_site`: `owner` and `site_design` are only used when the site is created, and changing them no longer replaces the site.
 
 ### Security
 

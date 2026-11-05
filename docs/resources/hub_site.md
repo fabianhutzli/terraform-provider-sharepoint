@@ -29,7 +29,7 @@ resource "sharepoint_hub_site" "corporate" {
 
 ### Required
 
-- `owner` (String) UPN of the site owner, e.g. admin@contoso.onmicrosoft.com. Required in App-Only context because there is no user identity.
+- `owner` (String) UPN of the site owner, e.g. admin@contoso.onmicrosoft.com. Required in App-Only context because there is no user identity. Only used when the site is created; changing it later doesn't change the site's owner.
 - `title` (String) Display name of the hub site.
 - `url` (String) Full URL of the site, e.g. https://contoso.sharepoint.com/sites/hub.
 
@@ -38,7 +38,7 @@ resource "sharepoint_hub_site" "corporate" {
 - `hub_logo_url` (String) Absolute URL of the logo image shown in the hub navigation bar.
 - `lcid` (Number) Locale ID for the default site language (1033=en-US, 1031=de-DE, 1036=fr-FR, 1040=it-IT).
 - `requires_join_approval` (Boolean) When true, sites must be approved before they can join this hub.
-- `site_design` (String) Communication site design template: Blank, Showcase, or Topic.
+- `site_design` (String) Communication site design template: Blank, Showcase, or Topic. Only used when the site is created; changing it later has no effect.
 - `time_zone_id` (Number) SharePoint time zone ID.
 
 ### Read-Only
@@ -46,3 +46,15 @@ resource "sharepoint_hub_site" "corporate" {
 - `hub_site_id` (String) GUID assigned to this site by the hub registration.
 - `id` (String) Site collection GUID (same as site_id).
 - `site_id` (String) SharePoint site collection GUID.
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Import ID format: <site_url>
+# The site must already be registered as a hub site.
+terraform import sharepoint_hub_site.corporate "https://contoso.sharepoint.com/sites/corporate-hub"
+```
