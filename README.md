@@ -96,6 +96,22 @@ resource "sharepoint_hub_site" "corporate" {
 
 Every resource page on the [Terraform Registry](https://registry.terraform.io/providers/fabianhutzli/sharepoint/latest/docs) has a usage example. The same snippets are in [examples/resources/](examples/resources/).
 
+## Importing existing sites
+
+Existing sites can be brought under Terraform with [import blocks](https://developer.hashicorp.com/terraform/language/import). Each resource's page lists its import ID format, and what it can't import.
+
+Rather than writing those by hand, generate them. `importgen` reads a site and writes an import block plus a matching resource block for each object it holds: the site, custom permission levels, site groups and their Entra security group members, lists with their custom fields and views, and navigation. It signs in with the same `SHAREPOINT_*` environment variables as the provider:
+
+```sh
+go run github.com/fabianhutzli/terraform-provider-sharepoint/cmd/importgen@latest \
+  -site https://contoso.sharepoint.com/sites/hr > hr.tf
+terraform plan
+```
+
+The generated configuration holds the real values, so the first plan should show only imports and no changes. Check that before applying. Anything it can't import is listed in a comment at the top of the file, such as individual users in site groups, calendar views, and the system lists SharePoint provisions itself (Site Pages, Style Library, Form Templates). The site, its lists and its fields get `lifecycle { prevent_destroy = true }`; pass `-prevent-destroy=false` to leave it out.
+
+Navigation nodes are recorded with `open_in_new_window = false`, because SharePoint doesn't report it. Set it to `true` on any node that opens in a new window, or the first update to that node resets it.
+
 ## Resources
 
 | Resource | Purpose |

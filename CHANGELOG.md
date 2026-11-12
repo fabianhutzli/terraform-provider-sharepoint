@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Provider: workload identity federation from GitHub Actions or Azure DevOps (`auth_type = "federatedIdentity"`), with no stored secret.
 - `sharepoint_site`, `sharepoint_associated_site` and `sharepoint_hub_site` can be imported, using the site's URL as the import ID. Importing needs SharePoint admin access, because it reads the site's admin properties. `site_design` can't be read back, so it is recorded as `Topic`.
 - `sharepoint_permission_level` (custom levels only), `sharepoint_site_group`, `sharepoint_list`, `sharepoint_navigation_node` and `sharepoint_site_group_member` (Entra groups only) can be imported.
+- `importgen` (`cmd/importgen`) writes import blocks and matching resource blocks for an existing site and its structure, so the first plan after importing shows no changes.
+- `sharepoint_field` and `sharepoint_list_view` can be imported. On an imported field, `xml` and `options` are only recorded and never replace it, because SharePoint's version of the XML can't be matched in configuration.
 
 ### Fixed
 

@@ -1,9 +1,13 @@
 package sharepoint
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 func TestSiteURLFromImportID(t *testing.T) {
@@ -436,15 +440,167 @@ func TestCheckEntraGroupMember(t *testing.T) {
 	}
 }
 
-func TestEntraGroupGUIDPattern(t *testing.T) {
+func TestGUIDPattern(t *testing.T) {
 	for value, want := range map[string]bool{
 		"00000000-0000-0000-0000-000000000000": true,
 		"AAAAAAAA-0000-0000-0000-000000000000": true,
 		"HR Leads":                             false,
 		"00000000-0000-0000-0000":              false,
 	} {
-		if got := entraGroupGUIDPattern.MatchString(value); got != want {
+		if got := guidPattern.MatchString(value); got != want {
 			t.Errorf("MatchString(%q) = %v, want %v", value, got, want)
 		}
+	}
+}
+
+func TestSplitListItemImportID(t *testing.T) {
+	const (
+		web   = "https://contoso.sharepoint.com/sites/hr"
+		field = "11111111-1111-1111-1111-111111111111"
+		list  = "22222222-2222-2222-2222-222222222222"
+	)
+	tests := []struct {
+		name         string
+		id           string
+		listOptional bool
+		wantScope    *listScope
+		wantErr      string
+	}{
+		{name: "site column", id: web + "|" + field, listOptional: true},
+		{name: "list by id", id: web + "|" + list + "|" + field, listOptional: true,
+			wantScope: &listScope{ID: types.StringValue(list), URL: types.StringNull(), Title: types.StringNull()}},
+		{name: "list by url", id: web + "|/sites/hr/Lists/Requests|" + field,
+			wantScope: &listScope{ID: types.StringNull(), URL: types.StringValue("/sites/hr/Lists/Requests"), Title: types.StringNull()}},
+		{name: "list by title with separator", id: web + "|Requests|EU|" + field,
+			wantScope: &listScope{ID: types.StringNull(), URL: types.StringNull(), Title: types.StringValue("Requests|EU")}},
+		{name: "list required", id: web + "|" + field, wantErr: "<web_url>|<list>|<view_id>"},
+		{name: "item id must be a guid", id: web + "|Requests|Status", listOptional: true, wantErr: "GUID"},
+		{name: "empty list", id: web + "||" + field, listOptional: true, wantErr: "expected"},
+		{name: "not a url", id: "hr|" + field, listOptional: true, wantErr: "full URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idName := "view_id"
+			if tt.listOptional {
+				idName = "field_id"
+			}
+			gotWeb, scope, item, err := splitListItemImportID(tt.id, idName, tt.listOptional)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotWeb != web || item != field {
+				t.Errorf("got %q, %q", gotWeb, item)
+			}
+			if (scope == nil) != (tt.wantScope == nil) {
+				t.Fatalf("scope = %v, want %v", scope, tt.wantScope)
+			}
+			if scope != nil && *scope != *tt.wantScope {
+				t.Errorf("scope = %+v, want %+v", *scope, *tt.wantScope)
+			}
+		})
+	}
+}
+
+// fakePrivate stands in for the framework's private state.
+type fakePrivate map[string][]byte
+
+func (p fakePrivate) GetKey(_ context.Context, key string) ([]byte, diag.Diagnostics) {
+	return p[key], nil
+}
+
+func (p fakePrivate) SetKey(_ context.Context, key string, value []byte) diag.Diagnostics {
+	p[key] = value
+	return nil
+}
+
+func TestImportedMarker(t *testing.T) {
+	ctx := context.Background()
+	private := fakePrivate{}
+	if wasImported(ctx, private) {
+		t.Fatal("a created resource reports as imported")
+	}
+	if diags := markImported(ctx, private); diags.HasError() {
+		t.Fatal(diags)
+	}
+	if !wasImported(ctx, private) {
+		t.Error("an imported resource doesn't report as imported")
+	}
+	if wasImported(ctx, nil) {
+		t.Error("nil private state reports as imported")
+	}
+}
+
+func TestListViewImportedModel(t *testing.T) {
+	const listViewXML = `<View Name="{33333333-3333-3333-3333-333333333333}" DefaultView="TRUE" Type="HTML" DisplayName="All Documents"><Query><OrderBy><FieldRef Name="FileLeafRef" /></OrderBy></Query><ViewFields><FieldRef Name="DocIcon" /><FieldRef Name="LinkFilename" /><FieldRef Name="Modified" /></ViewFields><RowLimit Paged="TRUE">30</RowLimit></View>`
+	scope := parseListScope("Documents")
+
+	base := listViewResponse{
+		Id: "33333333-3333-3333-3333-333333333333", Title: "All Documents", ViewType: "HTML",
+		ViewQuery: `<OrderBy><FieldRef Name="FileLeafRef" /></OrderBy>`,
+		RowLimit:  30, Paged: true, DefaultView: true, ListViewXml: listViewXML,
+	}
+	got, err := base.importedModel("https://contoso.sharepoint.com/sites/hr", scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields []string
+	for _, v := range got.Fields.Elements() {
+		fields = append(fields, v.(types.String).ValueString())
+	}
+	if strings.Join(fields, ",") != "DocIcon,LinkFilename,Modified" {
+		t.Errorf("Fields = %v, want them in view order", fields)
+	}
+	if got.Type.ValueString() != "list" || !got.Default.ValueBool() || !got.Paged.ValueBool() || got.RowLimit.ValueInt64() != 30 {
+		t.Errorf("got %+v", got)
+	}
+	if got.ListTitle.ValueString() != "Documents" || !got.ListID.IsNull() {
+		t.Errorf("list scope = %s, %s", got.ListTitle, got.ListID)
+	}
+	// Unset attributes plan null; anything else would replace the view.
+	if !got.CalendarStartDateField.IsNull() || !got.KanbanBucketField.IsNull() || !got.Properties.IsNull() {
+		t.Error("unreadable attributes should be null")
+	}
+	if got.CalendarDefaultLayout.ValueString() != "month" {
+		t.Errorf("CalendarDefaultLayout = %s, want the attribute's default", got.CalendarDefaultLayout)
+	}
+
+	empty := base
+	empty.ViewQuery = ""
+	empty.ListViewXml = `<View Type="HTML"><ViewFields /></View>`
+	got, err = empty.importedModel("https://contoso.sharepoint.com/sites/hr", scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Fields.IsNull() || !got.ViewQuery.IsNull() {
+		t.Errorf("empty fields and query should be null, got %s and %s", got.Fields, got.ViewQuery)
+	}
+
+	gallery := base
+	gallery.ViewType2 = "TILES"
+	if got, err := gallery.importedModel("u", scope); err != nil || got.Type.ValueString() != "gallery" {
+		t.Errorf("gallery: %v, %v", got.Type, err)
+	}
+
+	for name, mutate := range map[string]func(*listViewResponse){
+		"hidden":           func(v *listViewResponse) { v.Hidden = true },
+		"classic calendar": func(v *listViewResponse) { v.ViewType = "CALENDAR" },
+		"modern calendar":  func(v *listViewResponse) { v.ViewType2 = "MODERNCALENDAR" },
+		"kanban":           func(v *listViewResponse) { v.ViewType2 = "KANBAN" },
+		"datasheet":        func(v *listViewResponse) { v.ViewType = "GRID" },
+		"bad xml":          func(v *listViewResponse) { v.ListViewXml = "<View" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			v := base
+			mutate(&v)
+			if _, err := v.importedModel("u", scope); err == nil {
+				t.Error("expected an error")
+			}
+		})
 	}
 }

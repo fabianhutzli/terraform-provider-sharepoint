@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -253,7 +252,7 @@ func (r *SiteGroupMemberResource) ImportState(ctx context.Context, req resource.
 	}
 
 	entraGroupID, entraGroupName := types.StringNull(), types.StringNull()
-	if entraGroupGUIDPattern.MatchString(entraGroup) {
+	if guidPattern.MatchString(entraGroup) {
 		entraGroupID = types.StringValue(entraGroup)
 	} else {
 		entraGroupName = types.StringValue(entraGroup)
@@ -271,9 +270,6 @@ func (r *SiteGroupMemberResource) ImportState(ctx context.Context, req resource.
 		EntraGroupName: entraGroupName,
 	})...)
 }
-
-// entraGroupGUIDPattern matches an Entra group object ID.
-var entraGroupGUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // splitGroupMemberImportID splits a "<site_url>|<group_name>|<entra_group>" import ID.
 func splitGroupMemberImportID(id string) (siteURL, groupName, entraGroup string, err error) {

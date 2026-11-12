@@ -4,12 +4,94 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/fabianhutzli/terraform-provider-sharepoint/internal/m365"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+// guidPattern matches a bare GUID, such as an Entra group, field or view ID.
+var guidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// importedKey is the private state key ImportState sets, so plan modifiers
+// can treat imported resources differently from ones Terraform created.
+const importedKey = "imported"
+
+// privateState is the part of the framework's private state used here, which
+// ImportState responses and plan modifier requests both provide.
+type privateState interface {
+	GetKey(ctx context.Context, key string) ([]byte, diag.Diagnostics)
+	SetKey(ctx context.Context, key string, value []byte) diag.Diagnostics
+}
+
+// markImported records in private state that a resource was imported.
+func markImported(ctx context.Context, private privateState) diag.Diagnostics {
+	return private.SetKey(ctx, importedKey, []byte("true"))
+}
+
+// wasImported reports whether markImported was called for this resource.
+func wasImported(ctx context.Context, private privateState) bool {
+	if private == nil {
+		return false
+	}
+	value, diags := private.GetKey(ctx, importedKey)
+	return !diags.HasError() && string(value) == "true"
+}
+
+// listScope identifies a list in an import ID, as a list_id, list_url or
+// list_title so that the configuration can use the same attribute.
+type listScope struct {
+	ID, URL, Title types.String
+}
+
+// parseListScope reads a list from an import ID: a GUID is a list_id, a path
+// starting with "/" is a list_url, and anything else is a list_title.
+func parseListScope(s string) listScope {
+	scope := listScope{ID: types.StringNull(), URL: types.StringNull(), Title: types.StringNull()}
+	switch {
+	case guidPattern.MatchString(s):
+		scope.ID = types.StringValue(s)
+	case strings.HasPrefix(s, "/"):
+		scope.URL = types.StringValue(s)
+	default:
+		scope.Title = types.StringValue(s)
+	}
+	return scope
+}
+
+// splitListItemImportID splits a "<web_url>|<list>|<id>" import ID. The list
+// may itself contain "|", since the web URL and ID can't. When listOptional
+// is set, "<web_url>|<id>" is accepted too and returns a nil scope.
+func splitListItemImportID(id, idName string, listOptional bool) (webURL string, scope *listScope, itemID string, err error) {
+	format := fmt.Sprintf("<web_url>|<list>|<%s>", idName)
+	if listOptional {
+		format = fmt.Sprintf("<web_url>|<%s>, or %s for a list's", idName, format)
+	}
+	parts := strings.Split(id, "|")
+	if len(parts) < 2 || (!listOptional && len(parts) < 3) {
+		return "", nil, "", fmt.Errorf("expected %s, got %q", format, id)
+	}
+	webURL, err = siteURLFromImportID(parts[0])
+	if err != nil {
+		return "", nil, "", err
+	}
+	itemID = parts[len(parts)-1]
+	if !guidPattern.MatchString(itemID) {
+		return "", nil, "", fmt.Errorf("expected %s to be a GUID, got %q", idName, itemID)
+	}
+	if len(parts) > 2 {
+		list := strings.Join(parts[1:len(parts)-1], "|")
+		if list == "" {
+			return "", nil, "", fmt.Errorf("expected %s, got %q", format, id)
+		}
+		s := parseListScope(list)
+		scope = &s
+	}
+	return webURL, scope, itemID, nil
+}
 
 const (
 	emptyGUID = "00000000-0000-0000-0000-000000000000"

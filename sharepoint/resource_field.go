@@ -20,6 +20,7 @@ import (
 )
 
 var _ resource.Resource = &FieldResource{}
+var _ resource.ResourceWithImportState = &FieldResource{}
 
 // FieldResource manages a SharePoint site or list column (field) created
 // from a CAML field definition.
@@ -88,19 +89,32 @@ func (r *FieldResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"xml": schema.StringAttribute{
-				Required:      true,
-				Description:   "CAML field definition, e.g. '<Field Type=\"Text\" DisplayName=\"...\" ID=\"{guid}\" StaticName=\"...\" Name=\"...\" />'.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Required: true,
+				Description: "CAML field definition, e.g. '<Field Type=\"Text\" DisplayName=\"...\" ID=\"{guid}\" StaticName=\"...\" Name=\"...\" />'. " +
+					"Changing it replaces the field, except on an imported field, where it is only recorded: use properties to change an imported field.",
+				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplaceIf(
+					func(ctx context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
+						resp.RequiresReplace = !wasImported(ctx, req.Private)
+					},
+					"Replaces the field unless it was imported.",
+					"Replaces the field unless it was imported.",
+				)},
 			},
 			"options": schema.SetAttribute{
 				Optional:    true,
 				ElementType: types.StringType,
-				Description: "Options to apply when adding the field. Allowed values: DefaultValue, AddToDefaultContentType, AddToNoContentType, AddToAllContentTypes, AddFieldInternalNameHint, AddFieldToDefaultView, AddFieldCheckDisplayName.",
+				Description: "Options to apply when adding the field. Allowed values: DefaultValue, AddToDefaultContentType, AddToNoContentType, AddToAllContentTypes, AddFieldInternalNameHint, AddFieldToDefaultView, AddFieldCheckDisplayName. Changing it replaces the field, except on an imported field.",
 				Validators: []validator.Set{setvalidator.ValueStringsAre(stringvalidator.OneOf(
 					"DefaultValue", "AddToDefaultContentType", "AddToNoContentType", "AddToAllContentTypes",
 					"AddFieldInternalNameHint", "AddFieldToDefaultView", "AddFieldCheckDisplayName",
 				))},
-				PlanModifiers: []planmodifier.Set{setplanmodifier.RequiresReplace()},
+				PlanModifiers: []planmodifier.Set{setplanmodifier.RequiresReplaceIf(
+					func(ctx context.Context, req planmodifier.SetRequest, resp *setplanmodifier.RequiresReplaceIfFuncResponse) {
+						resp.RequiresReplace = !wasImported(ctx, req.Private)
+					},
+					"Replaces the field unless it was imported.",
+					"Replaces the field unless it was imported.",
+				)},
 			},
 			"update_existing_lists": schema.BoolAttribute{
 				Optional:    true,
@@ -285,6 +299,70 @@ func (r *FieldResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	}
 }
 
+// ---- Import ----
+
+// ImportState imports an existing field by "<web_url>|<field_id>" for a site
+// column, or "<web_url>|<list>|<field_id>" for a list column. SharePoint
+// returns the field's XML with attributes of its own added, so no
+// configuration could match it; the field is marked as imported, which stops
+// xml and options from replacing it and putting its data at risk.
+func (r *FieldResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	webURL, scope, fieldID, err := splitListItemImportID(req.ID, "field_id", true)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	if r.runner == nil {
+		resp.Diagnostics.AddError("Provider not configured", "The provider must be configured before resources can be imported.")
+		return
+	}
+
+	state := FieldModel{
+		ID:                  types.StringValue(fieldID),
+		WebURL:              types.StringValue(webURL),
+		ListTitle:           types.StringNull(),
+		ListID:              types.StringNull(),
+		ListURL:             types.StringNull(),
+		Options:             types.SetNull(types.StringType),
+		UpdateExistingLists: types.BoolValue(false),
+		Properties:          types.MapNull(types.StringType),
+	}
+	if scope != nil {
+		state.ListTitle, state.ListID, state.ListURL = scope.Title, scope.ID, scope.URL
+	}
+
+	args := []string{"spo", "field", "get", "--webUrl", webURL}
+	args = append(args, listIdentifierArgs(state.ListTitle, state.ListID, state.ListURL)...)
+	args = append(args, "--id", fieldID)
+	out, err := r.runner.Run(ctx, args...)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read field", err.Error())
+		return
+	}
+	var field fieldGetResponse
+	if err := json.Unmarshal(out, &field); err != nil {
+		resp.Diagnostics.AddError("Failed to parse field response",
+			fmt.Sprintf("%s\nJSON: %s", err.Error(), string(out)))
+		return
+	}
+	if !field.CanBeDeleted {
+		resp.Diagnostics.AddError("Cannot import field",
+			fmt.Sprintf("%q is a built-in field that SharePoint doesn't allow to be deleted, so this resource can't manage it.", field.InternalName))
+		return
+	}
+
+	state.ID = types.StringValue(m365.NormalizeGUID(field.Id))
+	state.XML = types.StringValue(field.SchemaXml)
+	state.Title = types.StringValue(field.Title)
+	state.InternalName = types.StringValue(field.InternalName)
+	state.TypeAsString = types.StringValue(field.TypeAsString)
+	state.Group = types.StringValue(field.Group)
+	state.SchemaXML = types.StringValue(field.SchemaXml)
+
+	resp.Diagnostics.Append(markImported(ctx, resp.Private)...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
+}
+
 // ---- helpers ----
 
 // setFieldProperties runs `spo field set` pushing props as --Name value args.
@@ -355,4 +433,5 @@ type fieldGetResponse struct {
 	TypeAsString string `json:"TypeAsString"`
 	Group        string `json:"Group"`
 	SchemaXml    string `json:"SchemaXml"`
+	CanBeDeleted bool   `json:"CanBeDeleted"`
 }

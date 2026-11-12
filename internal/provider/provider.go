@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -92,20 +93,7 @@ func (p *SharePointProvider) Configure(ctx context.Context, req provider.Configu
 		return
 	}
 
-	creds := credentials{
-		AuthType:   resolveEnv(config.AuthType, "SHAREPOINT_AUTH_TYPE"),
-		ClientID:   resolveEnv(config.ClientID, "SHAREPOINT_CLIENT_ID"),
-		TenantID:   resolveEnv(config.TenantID, "SHAREPOINT_TENANT_ID"),
-		CertPath:   resolveEnv(config.CertificatePath, "SHAREPOINT_CERTIFICATE_PATH"),
-		CertBase64: resolveEnv(config.CertificateBase64, "SHAREPOINT_CERTIFICATE_BASE64"),
-		CertPass:   resolveEnv(config.CertificatePassword, "SHAREPOINT_CERTIFICATE_PASSWORD"),
-		// Set by Azure DevOps AzureCLI/AzurePowerShell tasks that use a
-		// service connection; the m365 CLI then reads the app and tenant
-		// from the service connection.
-		ServiceConnection: os.Getenv("AZURESUBSCRIPTION_SERVICE_CONNECTION_ID") != "",
-	}
-
-	runner, diags := newRunner(creds)
+	runner, diags := newRunner(resolveCredentials(config))
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -147,6 +135,38 @@ func resolveEnv(val types.String, envKey string) string {
 		return val.ValueString()
 	}
 	return os.Getenv(envKey)
+}
+
+// RunnerFromEnv builds a Runner from the SHAREPOINT_* environment variables
+// alone, validated as the provider validates them, for tools that run outside
+// Terraform.
+func RunnerFromEnv() (*m365.Runner, error) {
+	runner, diags := newRunner(resolveCredentials(SharePointProviderModel{}))
+	if diags.HasError() {
+		var msgs []string
+		for _, d := range diags.Errors() {
+			msgs = append(msgs, d.Summary()+": "+d.Detail())
+		}
+		return nil, errors.New(strings.Join(msgs, "\n"))
+	}
+	return runner, nil
+}
+
+// resolveCredentials merges the provider block with the SHAREPOINT_*
+// environment variables, the block taking precedence.
+func resolveCredentials(config SharePointProviderModel) credentials {
+	return credentials{
+		AuthType:   resolveEnv(config.AuthType, "SHAREPOINT_AUTH_TYPE"),
+		ClientID:   resolveEnv(config.ClientID, "SHAREPOINT_CLIENT_ID"),
+		TenantID:   resolveEnv(config.TenantID, "SHAREPOINT_TENANT_ID"),
+		CertPath:   resolveEnv(config.CertificatePath, "SHAREPOINT_CERTIFICATE_PATH"),
+		CertBase64: resolveEnv(config.CertificateBase64, "SHAREPOINT_CERTIFICATE_BASE64"),
+		CertPass:   resolveEnv(config.CertificatePassword, "SHAREPOINT_CERTIFICATE_PASSWORD"),
+		// Set by Azure DevOps AzureCLI/AzurePowerShell tasks that use a
+		// service connection; the m365 CLI then reads the app and tenant
+		// from the service connection.
+		ServiceConnection: os.Getenv("AZURESUBSCRIPTION_SERVICE_CONNECTION_ID") != "",
+	}
 }
 
 // credentials holds the provider's auth settings after merging the provider
