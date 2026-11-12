@@ -103,7 +103,7 @@ func (r *FieldResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"options": schema.SetAttribute{
 				Optional:    true,
 				ElementType: types.StringType,
-				Description: "Options to apply when adding the field. Allowed values: DefaultValue, AddToDefaultContentType, AddToNoContentType, AddToAllContentTypes, AddFieldInternalNameHint, AddFieldToDefaultView, AddFieldCheckDisplayName. Changing it replaces the field, except on an imported field.",
+				Description: "Options to apply when adding the field. Allowed values: DefaultValue, AddToDefaultContentType, AddToNoContentType, AddToAllContentTypes, AddFieldInternalNameHint, AddFieldToDefaultView, AddFieldCheckDisplayName. On a list column, include AddFieldInternalNameHint to keep the xml's Name as the internal name; otherwise SharePoint derives it from DisplayName. Changing it replaces the field, except on an imported field.",
 				Validators: []validator.Set{setvalidator.ValueStringsAre(stringvalidator.OneOf(
 					"DefaultValue", "AddToDefaultContentType", "AddToNoContentType", "AddToAllContentTypes",
 					"AddFieldInternalNameHint", "AddFieldToDefaultView", "AddFieldCheckDisplayName",

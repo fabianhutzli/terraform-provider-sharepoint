@@ -604,3 +604,22 @@ func TestListViewImportedModel(t *testing.T) {
 		})
 	}
 }
+
+func TestSameURL(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"/sites/hr/Open%20requests.aspx", "/sites/hr/Open requests.aspx", true},
+		{"/sites/hr/Lists/Requests", "/sites/hr/Lists/Requests", true},
+		{"https://contoso.com/a%2Fb", "https://contoso.com/a/b", true},
+		{"/sites/hr/A.aspx", "/sites/hr/B.aspx", false},
+		{"/sites/hr/100%", "/sites/hr/100%", true},
+		{"/sites/hr/100%", "/sites/hr/100", false},
+	}
+	for _, tt := range tests {
+		if got := sameURL(tt.a, tt.b); got != tt.want {
+			t.Errorf("sameURL(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+	}
+}

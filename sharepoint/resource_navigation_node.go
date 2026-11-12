@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -401,7 +402,12 @@ func applyNavigationNodeResponse(ctx context.Context, model *NavigationNodeModel
 	var diags diag.Diagnostics
 	model.ID = types.StringValue(strconv.Itoa(node.Id))
 	model.Title = types.StringValue(node.Title)
-	model.URL = types.StringValue(node.Url)
+	// SharePoint stores URLs decoded, so a configured "Open%20requests.aspx"
+	// comes back as "Open requests.aspx". Keep the configured form when the
+	// two only differ in encoding, or the plan would never settle.
+	if model.URL.IsNull() || model.URL.IsUnknown() || !sameURL(model.URL.ValueString(), node.Url) {
+		model.URL = types.StringValue(node.Url)
+	}
 
 	// AudienceIds comes back as a nil (not empty) slice when the node has none,
 	// which SetValueFrom turns into a null Set; normalize to empty so it matches
@@ -416,6 +422,17 @@ func applyNavigationNodeResponse(ctx context.Context, model *NavigationNodeModel
 		model.AudienceIDs = idsList
 	}
 	return diags
+}
+
+// sameURL reports whether two URLs are the same once percent-encoding is
+// undone.
+func sameURL(a, b string) bool {
+	if a == b {
+		return true
+	}
+	da, errA := url.PathUnescape(a)
+	db, errB := url.PathUnescape(b)
+	return errA == nil && errB == nil && da == db
 }
 
 // navigationNodeResponse matches the JSON returned by m365 spo navigation

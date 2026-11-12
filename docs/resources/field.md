@@ -23,12 +23,14 @@ resource "sharepoint_field" "cost_center" {
   }
 }
 
-# List column, added to the list's default view
+# List column, added to the list's default view. On a list column SharePoint
+# takes the internal name from DisplayName ("Status") unless the options include
+# AddFieldInternalNameHint, so views and queries can refer to it as RequestStatus.
 resource "sharepoint_field" "request_status" {
   web_url    = "https://contoso.sharepoint.com/sites/hr"
   list_title = sharepoint_list.requests.title
   xml        = "<Field Type=\"Choice\" DisplayName=\"Status\" ID=\"{6b1f1b0e-3c43-4a8e-9f1e-0d2b7a4c5e61}\" StaticName=\"RequestStatus\" Name=\"RequestStatus\"><CHOICES><CHOICE>New</CHOICE><CHOICE>Approved</CHOICE><CHOICE>Rejected</CHOICE></CHOICES></Field>"
-  options    = ["AddFieldToDefaultView"]
+  options    = ["AddFieldInternalNameHint", "AddFieldToDefaultView"]
 }
 ```
 
@@ -45,7 +47,7 @@ resource "sharepoint_field" "request_status" {
 - `list_id` (String) ID of the list to create the field on (list column). Specify at most one of list_title, list_id, list_url; omit all three for a site column.
 - `list_title` (String) Title of the list to create the field on (list column). Specify at most one of list_title, list_id, list_url; omit all three for a site column.
 - `list_url` (String) Server- or site-relative URL of the list to create the field on (list column). Specify at most one of list_title, list_id, list_url; omit all three for a site column.
-- `options` (Set of String) Options to apply when adding the field. Allowed values: DefaultValue, AddToDefaultContentType, AddToNoContentType, AddToAllContentTypes, AddFieldInternalNameHint, AddFieldToDefaultView, AddFieldCheckDisplayName. Changing it replaces the field, except on an imported field.
+- `options` (Set of String) Options to apply when adding the field. Allowed values: DefaultValue, AddToDefaultContentType, AddToNoContentType, AddToAllContentTypes, AddFieldInternalNameHint, AddFieldToDefaultView, AddFieldCheckDisplayName. On a list column, include AddFieldInternalNameHint to keep the xml's Name as the internal name; otherwise SharePoint derives it from DisplayName. Changing it replaces the field, except on an imported field.
 - `properties` (Map of String) Field property overrides applied via `m365 spo field set` after creation, keyed by REST property name (e.g. Title, Description, JSLink, CustomFormatter). Removing a key from this map stops Terraform from tracking it but does not revert it remotely.
 - `update_existing_lists` (Boolean) For a site column, whether property updates (via `properties`) are pushed to lists that already use this field. Otherwise changes apply to new lists only.
 

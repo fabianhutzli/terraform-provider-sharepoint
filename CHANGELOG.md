@@ -21,6 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Resources deleted outside Terraform are now recognized on sites in any language, and missing fields, list views, permission levels and navigation nodes are recognized at all. Refresh used to fail with an error instead of removing them from state. This relies on the HTTP status and SharePoint error code rather than the translated message.
 - `sharepoint_site_group`: with `permission_level` unset in config, changing `description` no longer plans a replacement of the group.
 
+- `sharepoint_field` example: the list column now uses the `AddFieldInternalNameHint` option. Without it SharePoint named the column after its display name, so the `sharepoint_list_view` example's query referred to a column that didn't exist.
+- `sharepoint_navigation_node`: a percent-encoded `url` such as `Open%20requests.aspx` no longer fails with "Provider produced inconsistent result", since SharePoint stores it decoded.
 - `sharepoint_navigation_node`: with `url` unset in config, changing another attribute no longer sends an empty URL.
 
 ### Changed
