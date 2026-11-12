@@ -623,3 +623,18 @@ func TestSameURL(t *testing.T) {
 		}
 	}
 }
+
+func TestAbsoluteNodeURL(t *testing.T) {
+	const web = "https://contoso.sharepoint.com/sites/hr"
+	tests := []struct{ in, want string }{
+		{"/sites/hr/Lists/Requests", "https://contoso.sharepoint.com/sites/hr/Lists/Requests"},
+		{"https://intranet.contoso.com", "https://intranet.contoso.com"},
+		{"http://linkless.header/", "http://linkless.header/"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := absoluteNodeURL(web, tt.in); got != tt.want {
+			t.Errorf("absoluteNodeURL(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

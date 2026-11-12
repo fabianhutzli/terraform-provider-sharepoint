@@ -91,7 +91,7 @@ func (g *importGenerator) site() error {
 	if err != nil {
 		return fmt.Errorf("reading site: %w", err)
 	}
-	name := g.name("site", site.Title)
+	name := g.name("site", stableName(g.siteURL, site.Title))
 
 	if site.IsHubSite {
 		var hub hubSiteGetDetails
@@ -242,6 +242,9 @@ type listSummary struct {
 	BaseTemplate int64  `json:"BaseTemplate"`
 	Hidden       bool   `json:"Hidden"`
 	IsSystemList bool   `json:"IsSystemList"`
+	RootFolder   struct {
+		ServerRelativeUrl string `json:"ServerRelativeUrl"`
+	} `json:"RootFolder"`
 }
 
 // fieldSummary is the part of `m365 spo field list` output used here.
@@ -257,7 +260,7 @@ func (g *importGenerator) lists() error {
 	}
 
 	var lists []listSummary
-	if err := g.run(&lists, "spo", "list", "list", "--webUrl", g.siteURL, "--properties", "Id,Title,BaseTemplate,Hidden,IsSystemList"); err != nil {
+	if err := g.run(&lists, "spo", "list", "list", "--webUrl", g.siteURL, "--properties", "Id,Title,BaseTemplate,Hidden,IsSystemList,RootFolder/ServerRelativeUrl"); err != nil {
 		return err
 	}
 	for _, list := range lists {
@@ -275,7 +278,7 @@ func (g *importGenerator) lists() error {
 			g.skip("list %q: template %d is not supported", list.Title, list.BaseTemplate)
 			continue
 		}
-		listName := g.name("list", list.Title)
+		listName := g.name("list", stableName(list.RootFolder.ServerRelativeUrl, list.Title))
 		b := hclBlock{kind: "sharepoint_list", name: listName, importID: g.siteURL + "|" + list.Id, preventDestroy: g.opts.PreventDestroy}
 		b.str("web_url", g.siteURL)
 		b.str("title", list.Title)
@@ -361,7 +364,7 @@ func (g *importGenerator) views(list listSummary, listName string) error {
 		}
 		b := hclBlock{
 			kind:     "sharepoint_list_view",
-			name:     g.name("list_view", listName+"_"+view.Title),
+			name:     g.name("list_view", listName+"_"+stableName(view.ServerRelativeUrl, view.Title)),
 			importID: fmt.Sprintf("%s|%s|%s", g.siteURL, list.Id, model.ID.ValueString()),
 		}
 		b.str("web_url", g.siteURL)
@@ -406,8 +409,17 @@ func (g *importGenerator) navigation() error {
 	return nil
 }
 
+// recentNodeID is the QuickLaunch "Recent" heading. SharePoint maintains it
+// and the links below it itself, renaming them when a list is renamed, so
+// managing them would fight SharePoint.
+const recentNodeID = 1033
+
 func (g *importGenerator) navigationNodes(location string, nodes []navigationNodeListItem, parentID, prefix string) {
 	for _, node := range nodes {
+		if location == "QuickLaunch" && node.Id == recentNodeID {
+			g.skip("navigation node %q and the %d links below it: SharePoint maintains them itself", node.Title, len(node.Children))
+			continue
+		}
 		name := g.name("navigation_node", prefix+"_"+node.Title)
 		b := hclBlock{kind: "sharepoint_navigation_node", name: name, importID: fmt.Sprintf("%s|%d", g.siteURL, node.Id)}
 		b.str("web_url", g.siteURL)
@@ -531,6 +543,22 @@ func hclString(s string) string {
 	}
 	sb.WriteByte('"')
 	return sb.String()
+}
+
+// stableName picks what a resource name is derived from: the last segment of
+// its URL, which survives a rename in SharePoint, falling back to its title.
+// A name derived from a title would change on the next run after a rename,
+// and Terraform would plan to destroy the resource under its old name.
+func stableName(objectURL, title string) string {
+	segment := objectURL
+	if i := strings.LastIndex(strings.TrimRight(segment, "/"), "/"); i >= 0 {
+		segment = strings.TrimRight(segment, "/")[i+1:]
+	}
+	segment = strings.TrimSuffix(segment, ".aspx")
+	if segment == "" {
+		return title
+	}
+	return segment
 }
 
 // resourceName turns a title into a Terraform resource name: lowercase

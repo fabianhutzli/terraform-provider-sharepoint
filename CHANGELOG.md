@@ -22,6 +22,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `sharepoint_site_group`: with `permission_level` unset in config, changing `description` no longer plans a replacement of the group.
 
 - `sharepoint_field` example: the list column now uses the `AddFieldInternalNameHint` option. Without it SharePoint named the column after its display name, so the `sharepoint_list_view` example's query referred to a column that didn't exist.
+- `importgen` derives site, list and view names from their URLs rather than their titles, so they stay the same when a site, list or view is renamed and the generator is run again.
+- `importgen` no longer generates the QuickLaunch "Recent" node and its links, which SharePoint maintains itself and renames along with lists.
+- `sharepoint_navigation_node`: updating a node with a server-relative `url` failed with "SharePoint URL is not available" unless a SharePoint address was set with `m365 spo set`.
 - `sharepoint_navigation_node`: a percent-encoded `url` such as `Open%20requests.aspx` no longer fails with "Provider produced inconsistent result", since SharePoint stores it decoded.
 - `sharepoint_navigation_node`: with `url` unset in config, changing another attribute no longer sends an empty URL.
 

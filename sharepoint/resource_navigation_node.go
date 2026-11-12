@@ -254,7 +254,7 @@ func (r *NavigationNodeResource) Update(ctx context.Context, req resource.Update
 		"--openInNewWindow", strconv.FormatBool(plan.OpenInNewWindow.ValueBool()),
 	}
 	if !plan.URL.IsNull() {
-		args = append(args, "--url", plan.URL.ValueString())
+		args = append(args, "--url", absoluteNodeURL(state.WebURL.ValueString(), plan.URL.ValueString()))
 	}
 	if !plan.AudienceIDs.IsNull() {
 		args = append(args, "--audienceIds", strings.Join(audienceIDs, ","))
@@ -422,6 +422,22 @@ func applyNavigationNodeResponse(ctx context.Context, model *NavigationNodeModel
 		model.AudienceIDs = idsList
 	}
 	return diags
+}
+
+// absoluteNodeURL makes a server-relative URL absolute on the site's host.
+// `m365 spo navigation node set`, unlike `add`, rewrites any URL starting with
+// "/" using a SharePoint address configured with `m365 spo set`, and fails
+// without one. SharePoint stores the absolute URL server-relative again, so
+// the node reads back as configured.
+func absoluteNodeURL(webURL, nodeURL string) string {
+	if !strings.HasPrefix(nodeURL, "/") {
+		return nodeURL
+	}
+	site, err := url.Parse(webURL)
+	if err != nil || site.Scheme == "" || site.Host == "" {
+		return nodeURL
+	}
+	return site.Scheme + "://" + site.Host + nodeURL
 }
 
 // sameURL reports whether two URLs are the same once percent-encoding is

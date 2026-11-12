@@ -136,3 +136,19 @@ func TestIsCustomField(t *testing.T) {
 		}
 	}
 }
+
+func TestStableName(t *testing.T) {
+	tests := []struct{ url, title, want string }{
+		{"https://contoso.sharepoint.com/sites/tf-import-test", "TF Import Test Renamed", "tf-import-test"},
+		{"/sites/hr/Lists/Requests", "Requests Renamed", "Requests"},
+		{"/sites/hr/Shared Documents", "Dokumente", "Shared Documents"},
+		{"/sites/hr/Lists/Requests/Open requests.aspx", "Open (renamed)", "Open requests"},
+		{"/sites/hr/Lists/Requests/", "Requests", "Requests"},
+		{"", "Requests", "Requests"},
+	}
+	for _, tt := range tests {
+		if got := stableName(tt.url, tt.title); got != tt.want {
+			t.Errorf("stableName(%q, %q) = %q, want %q", tt.url, tt.title, got, tt.want)
+		}
+	}
+}

@@ -472,6 +472,9 @@ type listViewResponse struct {
 	PersonalView bool   `json:"PersonalView"`
 	DefaultView  bool   `json:"DefaultView"`
 	ListViewXml  string `json:"ListViewXml"`
+	// ServerRelativeUrl is the view's page, which keeps its name when the
+	// view is renamed.
+	ServerRelativeUrl string `json:"ServerRelativeUrl"`
 }
 
 // viewType maps a view's ViewType and ViewType2 to a type value, for the

@@ -63,6 +63,8 @@ The generated configuration holds the real values, so the first plan should show
 
 Navigation nodes are recorded with `open_in_new_window = false`, because SharePoint doesn't report it. Set it to `true` on any node that opens in a new window, or the first update to that node resets it.
 
+Run `importgen` once per site, then maintain the configuration it wrote. Running it again over a workspace that has already imported can produce different resource names: site, list and view names come from their URLs and survive a rename, but site group and navigation node names come from their titles. Terraform plans a renamed resource as a destroy of the old name plus an import of the new one, and `prevent_destroy` can't stop that, because it was in the removed block. If you do regenerate, read the plan, and map old names to new ones with [`moved` blocks](https://developer.hashicorp.com/terraform/language/moved) or `terraform state mv` before applying.
+
 ## Example Usage
 
 ```terraform
