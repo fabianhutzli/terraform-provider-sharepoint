@@ -51,7 +51,7 @@ Rebuild with `make install-dev` after every code change — Terraform doesn't kn
 **Published mode — test a real signed release** (the default, no env var needed), by installing the actual GitHub Release artifact into Terraform's local provider mirror:
 
 ```sh
-make install-release VERSION=0.1.0
+make install-release VERSION=0.2.0
 terraform init
 ```
 
