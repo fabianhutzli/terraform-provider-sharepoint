@@ -16,6 +16,7 @@ import (
 )
 
 var _ resource.Resource = &SiteGroupMemberResource{}
+var _ resource.ResourceWithImportState = &SiteGroupMemberResource{}
 
 // SiteGroupMemberResource manages the membership of an Azure Entra ID
 // (Azure AD) security group in a SharePoint Online site group.
@@ -219,6 +220,90 @@ func (r *SiteGroupMemberResource) Delete(ctx context.Context, req resource.Delet
 	}
 }
 
+// ---- Import ----
+
+// ImportState imports an existing membership by
+// "<site_url>|<group_name>|<entra_group_id_or_name>". A GUID sets
+// entra_group_id and anything else sets entra_group_name, matching the
+// attribute the configuration has to use.
+func (r *SiteGroupMemberResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	siteURL, groupName, entraGroup, err := splitGroupMemberImportID(req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	if r.runner == nil {
+		resp.Diagnostics.AddError("Provider not configured", "The provider must be configured before resources can be imported.")
+		return
+	}
+
+	membersJSON, err := r.runner.Run(ctx, "spo", "group", "member", "list",
+		"--webUrl", siteURL,
+		"--groupName", groupName,
+	)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to list group members", err.Error())
+		return
+	}
+	var members []groupMemberResponse
+	if err := json.Unmarshal(membersJSON, &members); err != nil {
+		resp.Diagnostics.AddError("Failed to parse group member list", err.Error())
+		return
+	}
+
+	entraGroupID, entraGroupName := types.StringNull(), types.StringNull()
+	if guidPattern.MatchString(entraGroup) {
+		entraGroupID = types.StringValue(entraGroup)
+	} else {
+		entraGroupName = types.StringValue(entraGroup)
+	}
+	if err := checkEntraGroupMember(members, entraGroupID.ValueString(), entraGroupName.ValueString()); err != nil {
+		resp.Diagnostics.AddError("Cannot import group member", err.Error())
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, SiteGroupMemberModel{
+		ID:             types.StringValue(fmt.Sprintf("%s|%s|%s", siteURL, groupName, entraGroup)),
+		SiteURL:        types.StringValue(siteURL),
+		GroupName:      types.StringValue(groupName),
+		EntraGroupID:   entraGroupID,
+		EntraGroupName: entraGroupName,
+	})...)
+}
+
+// splitGroupMemberImportID splits a "<site_url>|<group_name>|<entra_group>" import ID.
+func splitGroupMemberImportID(id string) (siteURL, groupName, entraGroup string, err error) {
+	siteURL, rest, err := splitImportID(id, "group_name>|<entra_group_id_or_name")
+	if err != nil {
+		return "", "", "", err
+	}
+	groupName, entraGroup, ok := strings.Cut(rest, "|")
+	if !ok || groupName == "" || entraGroup == "" {
+		return "", "", "", fmt.Errorf(`expected "<site_url>|<group_name>|<entra_group_id_or_name>", got %q`, id)
+	}
+	return siteURL, groupName, entraGroup, nil
+}
+
+// checkEntraGroupMember confirms that an Entra group is among members. A user
+// can share a display name with a group, and matches here only to explain why
+// it can't be imported: this resource can't manage users.
+func checkEntraGroupMember(members []groupMemberResponse, entraGroupID, entraGroupName string) error {
+	matchedUser := false
+	for _, m := range members {
+		if !m.matches(entraGroupID, entraGroupName) {
+			continue
+		}
+		if m.PrincipalType == principalTypeSecurityGroup {
+			return nil
+		}
+		matchedUser = true
+	}
+	if matchedUser {
+		return fmt.Errorf("this member is a user, not an Entra group; sharepoint_site_group_member can only manage Entra groups")
+	}
+	return fmt.Errorf("no such Entra group is a member of this site group")
+}
+
 // ---- helpers ----
 
 // memberExists lists the members of groupName and returns true when the Entra group is present.
@@ -238,20 +323,31 @@ func (r *SiteGroupMemberResource) memberExists(ctx context.Context, siteURL, gro
 	}
 
 	for _, m := range members {
-		if entraGroupID != "" && strings.Contains(strings.ToLower(m.LoginName), strings.ToLower(entraGroupID)) {
-			return true, nil
-		}
-		if entraGroupName != "" && strings.EqualFold(m.Title, entraGroupName) {
+		if m.matches(entraGroupID, entraGroupName) {
 			return true, nil
 		}
 	}
 	return false, nil
 }
 
+// matches reports whether this member is the given Entra group, by GUID
+// substring in LoginName or by display name in Title.
+func (m *groupMemberResponse) matches(entraGroupID, entraGroupName string) bool {
+	if entraGroupID != "" && strings.Contains(strings.ToLower(m.LoginName), strings.ToLower(entraGroupID)) {
+		return true
+	}
+	return entraGroupName != "" && strings.EqualFold(m.Title, entraGroupName)
+}
+
+// principalTypeSecurityGroup is the PrincipalType of an Entra security or
+// Microsoft 365 group; users are 1.
+const principalTypeSecurityGroup = 4
+
 // groupMemberResponse matches an entry from m365 spo group member list.
 type groupMemberResponse struct {
-	Id        int    `json:"Id"`
-	Title     string `json:"Title"`
-	LoginName string `json:"LoginName"`
-	Email     string `json:"Email"`
+	Id            int    `json:"Id"`
+	Title         string `json:"Title"`
+	LoginName     string `json:"LoginName"`
+	Email         string `json:"Email"`
+	PrincipalType int    `json:"PrincipalType"`
 }

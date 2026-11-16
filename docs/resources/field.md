@@ -23,12 +23,14 @@ resource "sharepoint_field" "cost_center" {
   }
 }
 
-# List column, added to the list's default view
+# List column, added to the list's default view. On a list column SharePoint
+# takes the internal name from DisplayName ("Status") unless the options include
+# AddFieldInternalNameHint, so views and queries can refer to it as RequestStatus.
 resource "sharepoint_field" "request_status" {
   web_url    = "https://contoso.sharepoint.com/sites/hr"
   list_title = sharepoint_list.requests.title
   xml        = "<Field Type=\"Choice\" DisplayName=\"Status\" ID=\"{6b1f1b0e-3c43-4a8e-9f1e-0d2b7a4c5e61}\" StaticName=\"RequestStatus\" Name=\"RequestStatus\"><CHOICES><CHOICE>New</CHOICE><CHOICE>Approved</CHOICE><CHOICE>Rejected</CHOICE></CHOICES></Field>"
-  options    = ["AddFieldToDefaultView"]
+  options    = ["AddFieldInternalNameHint", "AddFieldToDefaultView"]
 }
 ```
 
@@ -38,14 +40,14 @@ resource "sharepoint_field" "request_status" {
 ### Required
 
 - `web_url` (String) Absolute URL of the site where the field should be created.
-- `xml` (String) CAML field definition, e.g. '<Field Type="Text" DisplayName="..." ID="{guid}" StaticName="..." Name="..." />'.
+- `xml` (String) CAML field definition, e.g. '<Field Type="Text" DisplayName="..." ID="{guid}" StaticName="..." Name="..." />'. Changing it replaces the field, except on an imported field, where it is only recorded: use properties to change an imported field.
 
 ### Optional
 
 - `list_id` (String) ID of the list to create the field on (list column). Specify at most one of list_title, list_id, list_url; omit all three for a site column.
 - `list_title` (String) Title of the list to create the field on (list column). Specify at most one of list_title, list_id, list_url; omit all three for a site column.
 - `list_url` (String) Server- or site-relative URL of the list to create the field on (list column). Specify at most one of list_title, list_id, list_url; omit all three for a site column.
-- `options` (Set of String) Options to apply when adding the field. Allowed values: DefaultValue, AddToDefaultContentType, AddToNoContentType, AddToAllContentTypes, AddFieldInternalNameHint, AddFieldToDefaultView, AddFieldCheckDisplayName.
+- `options` (Set of String) Options to apply when adding the field. Allowed values: DefaultValue, AddToDefaultContentType, AddToNoContentType, AddToAllContentTypes, AddFieldInternalNameHint, AddFieldToDefaultView, AddFieldCheckDisplayName. On a list column, include AddFieldInternalNameHint to keep the xml's Name as the internal name; otherwise SharePoint derives it from DisplayName. Changing it replaces the field, except on an imported field.
 - `properties` (Map of String) Field property overrides applied via `m365 spo field set` after creation, keyed by REST property name (e.g. Title, Description, JSLink, CustomFormatter). Removing a key from this map stops Terraform from tracking it but does not revert it remotely.
 - `update_existing_lists` (Boolean) For a site column, whether property updates (via `properties`) are pushed to lists that already use this field. Otherwise changes apply to new lists only.
 
@@ -57,3 +59,24 @@ resource "sharepoint_field" "request_status" {
 - `schema_xml` (String) Current CAML schema XML of the field, as returned by SharePoint.
 - `title` (String) Current display title of the field.
 - `type_as_string` (String) Field type, e.g. Text, DateTime, URL.
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Import ID format: <web_url>|<field_id> for a site column, or
+# <web_url>|<list>|<field_id> for a list column. <list> is the list's ID, its
+# server-relative URL (starting with "/") or its title; use the same one your
+# configuration does (list_id, list_url or list_title), or the plan replaces the
+# field, deleting the column's data.
+# Find the ID with `m365 spo field list --webUrl <web_url> [--listId <list_id>]`.
+# Built-in fields that SharePoint doesn't allow to be deleted can't be imported.
+#
+# SharePoint returns a field's XML with attributes of its own added, so on an
+# imported field xml and options are only recorded and never replace it. Change
+# an imported field through properties.
+terraform import sharepoint_field.cost_center "https://contoso.sharepoint.com/sites/hr|2f1e37c2-9a3f-4e8a-8b7d-6c1e5a2b9f10"
+```

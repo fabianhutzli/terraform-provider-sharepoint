@@ -27,17 +27,34 @@ resource "sharepoint_site" "projects" {
 
 ### Required
 
-- `owner` (String) UPN of the site owner, e.g. admin@contoso.onmicrosoft.com. Required in App-Only context because there is no user identity.
-- `title` (String) Display name of the site.
+- `owner` (String) UPN of the site owner, e.g. admin@contoso.onmicrosoft.com. Required in App-Only context because there is no user identity. Only used when the site is created; changing it later doesn't change the site's owner.
+- `title` (String) Display name of the site. Changing this renames the site in place.
 - `url` (String) Full URL of the site, e.g. https://contoso.sharepoint.com/sites/hr.
 
 ### Optional
 
 - `lcid` (Number) Locale ID for the site language (1033=en-US, 1031=de-DE, 1036=fr-FR, 1040=it-IT). Changing this replaces the site.
-- `site_design` (String) Site design for CommunicationSite: Blank, Showcase, or Topic. Ignored for TeamSite.
+- `site_design` (String) Site design for CommunicationSite: Blank, Showcase, or Topic. Ignored for TeamSite. Only used when the site is created; changing it later has no effect.
 - `site_type` (String) Type of site to create: CommunicationSite or TeamSite.
 
 ### Read-Only
 
 - `id` (String) Site collection GUID (same as site_id).
 - `site_id` (String) SharePoint site collection GUID.
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Import ID format: <site_url>
+# Only Communication sites and group-connected Team sites can be imported.
+#
+# Before applying, check the plan shows no replacement: lcid and site_type can't
+# change on a live site, so a value in your configuration (or its default, 1033
+# and CommunicationSite) that differs from the real site plans a delete and
+# recreate. Consider `lifecycle { prevent_destroy = true }` on imported sites.
+terraform import sharepoint_site.projects "https://contoso.sharepoint.com/sites/projects"
+```

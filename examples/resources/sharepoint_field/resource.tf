@@ -8,10 +8,12 @@ resource "sharepoint_field" "cost_center" {
   }
 }
 
-# List column, added to the list's default view
+# List column, added to the list's default view. On a list column SharePoint
+# takes the internal name from DisplayName ("Status") unless the options include
+# AddFieldInternalNameHint, so views and queries can refer to it as RequestStatus.
 resource "sharepoint_field" "request_status" {
   web_url    = "https://contoso.sharepoint.com/sites/hr"
   list_title = sharepoint_list.requests.title
   xml        = "<Field Type=\"Choice\" DisplayName=\"Status\" ID=\"{6b1f1b0e-3c43-4a8e-9f1e-0d2b7a4c5e61}\" StaticName=\"RequestStatus\" Name=\"RequestStatus\"><CHOICES><CHOICE>New</CHOICE><CHOICE>Approved</CHOICE><CHOICE>Rejected</CHOICE></CHOICES></Field>"
-  options    = ["AddFieldToDefaultView"]
+  options    = ["AddFieldInternalNameHint", "AddFieldToDefaultView"]
 }

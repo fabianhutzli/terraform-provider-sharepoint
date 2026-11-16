@@ -1,6 +1,6 @@
 # Terraform Provider for SharePoint
 
-A Terraform provider for managing Microsoft SharePoint Online resources — sites, lists, permissions, site scripts/designs, themes, SPFx solutions, and tenant settings — using certificate-based Azure AD app-only authentication.
+A Terraform provider for managing Microsoft SharePoint Online resources — sites, lists, permissions, site scripts/designs, themes, SPFx solutions, and tenant settings — using app-only authentication with a certificate, an Azure managed identity or workload identity federation.
 
 ## How it works
 
@@ -19,7 +19,7 @@ terraform {
   required_providers {
     sharepoint = {
       source  = "fabianhutzli/sharepoint"
-      version = "~> 0.1"
+      version = "~> 0.2"
     }
   }
 }
@@ -29,32 +29,56 @@ To run a locally built provider while developing, see [CONTRIBUTING.md](CONTRIBU
 
 ## Authentication
 
-The provider authenticates using an Azure AD app registration with a certificate, via app-only (unattended) authentication — no interactive sign-in.
+The provider signs in unattended (app-only) — no interactive sign-in. `auth_type` picks one of three methods:
 
-1. Register an application in Azure AD (Entra ID) and grant it the SharePoint application permissions your configuration needs (e.g. `Sites.FullControl.All`).
-2. Generate a certificate and upload its public key to the app registration.
-3. Configure the provider with the app's client ID, your tenant ID, and the certificate (as a file path or inline base64), all of which can be set via `provider` block attributes or environment variables:
+- **`certificate`** (default): an Entra ID app registration with a certificate.
+- **`identity`**: an Azure managed identity, for Terraform running on Azure (VMs, Container Apps, Functions, Cloud Shell).
+- **`federatedIdentity`**: workload identity federation from GitHub Actions or Azure DevOps — the pipeline's OIDC token is exchanged for an Entra ID token, so no secret is stored.
+
+Grant the app registration or managed identity the SharePoint application permissions your configuration needs (e.g. `Sites.FullControl.All`). Settings that don't apply to the chosen `auth_type` are ignored. Every attribute can be set in the `provider` block or through an environment variable:
 
 | Attribute | Environment variable | Description |
 |---|---|---|
-| `client_id` | `SHAREPOINT_CLIENT_ID` | Azure AD application (client) ID |
-| `tenant_id` | `SHAREPOINT_TENANT_ID` | Azure AD tenant ID (GUID) or domain, e.g. `contoso.onmicrosoft.com` |
+| `auth_type` | `SHAREPOINT_AUTH_TYPE` | `certificate` (default), `identity` or `federatedIdentity` |
+| `client_id` | `SHAREPOINT_CLIENT_ID` | Entra ID application (client) ID. For `identity`, the client ID of a user-assigned managed identity (leave unset for system-assigned) |
+| `tenant_id` | `SHAREPOINT_TENANT_ID` | Entra ID tenant ID (GUID) or domain, e.g. `contoso.onmicrosoft.com`. Not used for `identity` |
 | `certificate_path` | `SHAREPOINT_CERTIFICATE_PATH` | Absolute path to a PFX certificate file. Mutually exclusive with `certificate_base64` |
 | `certificate_base64` | `SHAREPOINT_CERTIFICATE_BASE64` | Base64-encoded PFX certificate — use for CI/CD where writing a file to disk isn't convenient |
 | `certificate_password` | `SHAREPOINT_CERTIFICATE_PASSWORD` | Password for the PFX certificate. Leave unset if the certificate has none |
 
 ```hcl
+# Certificate
 provider "sharepoint" {
   client_id             = var.sharepoint_client_id
   tenant_id             = var.sharepoint_tenant_id
   certificate_path      = var.sharepoint_certificate_path
   certificate_password  = var.sharepoint_certificate_password
 }
+
+# Managed identity (user-assigned; drop client_id for system-assigned)
+provider "sharepoint" {
+  auth_type = "identity"
+  client_id = var.managed_identity_client_id
+}
+
+# Federated identity (GitHub Actions)
+provider "sharepoint" {
+  auth_type = "federatedIdentity"
+  client_id = var.sharepoint_client_id
+  tenant_id = var.sharepoint_tenant_id
+}
 ```
+
+### Federated identity in CI/CD
+
+First add a federated credential to the app registration that trusts your repository or pipeline. Then:
+
+- **GitHub Actions:** give the job `permissions: id-token: write` and set `client_id` and `tenant_id`.
+- **Azure DevOps:** run Terraform inside an `AzureCLI@2` or `AzurePowerShell@5` task with a workload identity federation service connection, and add `SYSTEM_ACCESSTOKEN: $(System.AccessToken)` to the task's `env`. The `m365` CLI takes `client_id` and `tenant_id` from the service connection, so you can leave them unset.
 
 ### Security note
 
-The certificate password is passed to the `m365` CLI as a `--password` process argument during the one-time login the provider performs. The `m365` CLI (as of v11.8.0) has no environment-variable or stdin alternative for this flag, so for the brief lifetime of that login process, the password is visible to other local users on the same machine via `ps` or `/proc/<pid>/cmdline`. This provider does not log or persist the password itself, and redacts it from any error output the CLI returns. If this residual exposure is a concern for your environment, run Terraform on a single-tenant machine (e.g. a dedicated CI runner) rather than a shared multi-user host.
+The certificate and its password are never passed to the `m365` CLI as command-line arguments, where other local users could read them from the process list. The provider writes them to temporary files readable only by the current user, passes them to the CLI by path (`@<path>` for the password, which the CLI replaces with the file's contents), and deletes them right after the one-time login. The password is also redacted from any error output the CLI returns.
 
 ## Usage
 
@@ -71,6 +95,24 @@ resource "sharepoint_hub_site" "corporate" {
 ```
 
 Every resource page on the [Terraform Registry](https://registry.terraform.io/providers/fabianhutzli/sharepoint/latest/docs) has a usage example. The same snippets are in [examples/resources/](examples/resources/).
+
+## Importing existing sites
+
+Existing sites can be brought under Terraform with [import blocks](https://developer.hashicorp.com/terraform/language/import). Each resource's page lists its import ID format, and what it can't import.
+
+Rather than writing those by hand, generate them. `importgen` reads a site and writes an import block plus a matching resource block for each object it holds: the site, custom permission levels, site groups and their Entra security group members, lists with their custom fields and views, and navigation. It signs in with the same `SHAREPOINT_*` environment variables as the provider:
+
+```sh
+go run github.com/fabianhutzli/terraform-provider-sharepoint/cmd/importgen@latest \
+  -site https://contoso.sharepoint.com/sites/hr > hr.tf
+terraform plan
+```
+
+The generated configuration holds the real values, so the first plan should show only imports and no changes. Check that before applying. Anything it can't import is listed in a comment at the top of the file, such as individual users in site groups, calendar views, and the system lists SharePoint provisions itself (Site Pages, Style Library, Form Templates). The site, its lists and its fields get `lifecycle { prevent_destroy = true }`; pass `-prevent-destroy=false` to leave it out.
+
+Navigation nodes are recorded with `open_in_new_window = false`, because SharePoint doesn't report it. Set it to `true` on any node that opens in a new window, or the first update to that node resets it.
+
+Run `importgen` once per site, then maintain the configuration it wrote. Running it again over a workspace that has already imported can produce different resource names: site, list and view names come from their URLs and survive a rename, but site group and navigation node names come from their titles. Terraform plans a renamed resource as a destroy of the old name plus an import of the new one, and `prevent_destroy` can't stop that, because it was in the removed block. If you do regenerate, read the plan, and map old names to new ones with [`moved` blocks](https://developer.hashicorp.com/terraform/language/moved) or `terraform state mv` before applying.
 
 ## Resources
 

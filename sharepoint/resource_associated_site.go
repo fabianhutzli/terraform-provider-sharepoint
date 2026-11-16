@@ -21,6 +21,7 @@ import (
 )
 
 var _ resource.Resource = &AssociatedSiteResource{}
+var _ resource.ResourceWithImportState = &AssociatedSiteResource{}
 
 // AssociatedSiteResource manages a SharePoint Online site (Communication or
 // Team) associated with a Hub Site.
@@ -62,9 +63,8 @@ func (r *AssociatedSiteResource) Schema(_ context.Context, _ resource.SchemaRequ
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"title": schema.StringAttribute{
-				Required:      true,
-				Description:   "Display name of the site.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Required:    true,
+				Description: "Display name of the site. Changing this renames the site in place.",
 			},
 			"url": schema.StringAttribute{
 				Required:      true,
@@ -72,9 +72,8 @@ func (r *AssociatedSiteResource) Schema(_ context.Context, _ resource.SchemaRequ
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"owner": schema.StringAttribute{
-				Required:      true,
-				Description:   "UPN of the site owner, e.g. admin@contoso.onmicrosoft.com. Required in App-Only context because there is no user identity.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Required:    true,
+				Description: "UPN of the site owner, e.g. admin@contoso.onmicrosoft.com. Required in App-Only context because there is no user identity. Only used when the site is created; changing it later doesn't change the site's owner.",
 			},
 			"hub_site_url": schema.StringAttribute{
 				Required:    true,
@@ -96,12 +95,11 @@ func (r *AssociatedSiteResource) Schema(_ context.Context, _ resource.SchemaRequ
 				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
 			},
 			"site_design": schema.StringAttribute{
-				Optional:      true,
-				Computed:      true,
-				Default:       stringdefault.StaticString("Topic"),
-				Description:   "Site design for CommunicationSite: Blank, Showcase, or Topic. Ignored for TeamSite.",
-				Validators:    []validator.String{stringvalidator.OneOf("Blank", "Showcase", "Topic")},
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Optional:    true,
+				Computed:    true,
+				Default:     stringdefault.StaticString("Topic"),
+				Description: "Site design for CommunicationSite: Blank, Showcase, or Topic. Ignored for TeamSite. Only used when the site is created; changing it later has no effect.",
+				Validators:  []validator.String{stringvalidator.OneOf("Blank", "Showcase", "Topic")},
 			},
 			"site_id": schema.StringAttribute{
 				Computed:      true,
@@ -343,6 +341,45 @@ func (r *AssociatedSiteResource) Delete(ctx context.Context, req resource.Delete
 	); err != nil && !m365.IsNotFound(err) {
 		resp.Diagnostics.AddError("Failed to remove site", err.Error())
 	}
+}
+
+// ---- Import ----
+
+// ImportState imports an existing hub-associated site by its URL. It records
+// everything Read doesn't refresh, because a missing lcid or site_type would
+// plan a replacement.
+func (r *AssociatedSiteResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	siteURL, err := siteURLFromImportID(req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	if r.runner == nil {
+		resp.Diagnostics.AddError("Provider not configured", "The provider must be configured before resources can be imported.")
+		return
+	}
+
+	site, err := fetchTenantSite(ctx, r.runner, siteURL)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read site", err.Error())
+		return
+	}
+	hubSiteID, err := site.connectedHubSiteID()
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot import site", err.Error())
+		return
+	}
+	hub, err := fetchHubSite(ctx, r.runner, hubSiteID)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read hub site", err.Error())
+		return
+	}
+	state, err := site.associatedSiteModel(siteURL, hub.SiteUrl)
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot import site", err.Error())
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 
 // ---- helpers ----

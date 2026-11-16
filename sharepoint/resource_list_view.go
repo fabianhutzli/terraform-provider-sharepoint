@@ -3,12 +3,14 @@ package sharepoint
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/fabianhutzli/terraform-provider-sharepoint/internal/m365"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -24,6 +26,7 @@ import (
 )
 
 var _ resource.Resource = &ListViewResource{}
+var _ resource.ResourceWithImportState = &ListViewResource{}
 
 // ListViewResource manages a view on a SharePoint list.
 type ListViewResource struct {
@@ -416,8 +419,148 @@ func (r *ListViewResource) readListView(ctx context.Context, model *ListViewMode
 	return nil
 }
 
+// ---- Import ----
+
+// ImportState imports an existing view by "<web_url>|<list>|<view_id>",
+// recording everything set at creation from the view itself, because a
+// difference would plan a replacement. Hidden system views are refused, and so
+// are calendar and Kanban views, whose date and bucket fields can't be read.
+func (r *ListViewResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	webURL, scope, viewID, err := splitListItemImportID(req.ID, "view_id", false)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	if r.runner == nil {
+		resp.Diagnostics.AddError("Provider not configured", "The provider must be configured before resources can be imported.")
+		return
+	}
+
+	args := []string{"spo", "list", "view", "get", "--webUrl", webURL}
+	args = append(args, listIdentifierArgs(scope.Title, scope.ID, scope.URL)...)
+	args = append(args, "--id", viewID)
+	out, err := r.runner.Run(ctx, args...)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read list view", err.Error())
+		return
+	}
+	var view listViewResponse
+	if err := json.Unmarshal(out, &view); err != nil {
+		resp.Diagnostics.AddError("Failed to parse list view response",
+			fmt.Sprintf("%s\nJSON: %s", err.Error(), string(out)))
+		return
+	}
+
+	state, err := view.importedModel(webURL, *scope)
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot import list view", err.Error())
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
+}
+
 // listViewResponse matches the (partial) JSON returned by m365 spo list view add/get.
 type listViewResponse struct {
-	Id    string `json:"Id"`
-	Title string `json:"Title"`
+	Id           string `json:"Id"`
+	Title        string `json:"Title"`
+	Hidden       bool   `json:"Hidden"`
+	ViewType     string `json:"ViewType"`
+	ViewType2    string `json:"ViewType2"`
+	ViewQuery    string `json:"ViewQuery"`
+	RowLimit     int64  `json:"RowLimit"`
+	Paged        bool   `json:"Paged"`
+	PersonalView bool   `json:"PersonalView"`
+	DefaultView  bool   `json:"DefaultView"`
+	ListViewXml  string `json:"ListViewXml"`
+	// ServerRelativeUrl is the view's page, which keeps its name when the
+	// view is renamed.
+	ServerRelativeUrl string `json:"ServerRelativeUrl"`
+}
+
+// viewType maps a view's ViewType and ViewType2 to a type value, for the
+// types whose settings can all be read back.
+func (v *listViewResponse) viewType() (string, error) {
+	switch {
+	case strings.EqualFold(v.ViewType, "HTML") && v.ViewType2 == "":
+		return "list", nil
+	case strings.EqualFold(v.ViewType2, "TILES"):
+		return "gallery", nil
+	case strings.EqualFold(v.ViewType2, "KANBAN"):
+		return "", fmt.Errorf("kanban views can't be imported: SharePoint doesn't report their bucket field")
+	case strings.EqualFold(v.ViewType, "CALENDAR") || strings.EqualFold(v.ViewType2, "MODERNCALENDAR"):
+		return "", fmt.Errorf("calendar views can't be imported: SharePoint doesn't report their date and title fields")
+	}
+	return "", fmt.Errorf("views of type %s/%s aren't supported", v.ViewType, v.ViewType2)
+}
+
+// viewFields returns the internal names of the view's fields, in order, from
+// its ListViewXml.
+func (v *listViewResponse) viewFields() ([]string, error) {
+	var parsed struct {
+		ViewFields struct {
+			FieldRefs []struct {
+				Name string `xml:"Name,attr"`
+			} `xml:"FieldRef"`
+		} `xml:"ViewFields"`
+	}
+	if err := xml.Unmarshal([]byte(v.ListViewXml), &parsed); err != nil {
+		return nil, fmt.Errorf("parsing view XML: %w", err)
+	}
+	fields := make([]string, 0, len(parsed.ViewFields.FieldRefs))
+	for _, ref := range parsed.ViewFields.FieldRefs {
+		fields = append(fields, ref.Name)
+	}
+	return fields, nil
+}
+
+// importedModel builds the state of an imported view. Empty fields and
+// queries are recorded as null, which is what an unset attribute plans.
+func (v *listViewResponse) importedModel(webURL string, scope listScope) (ListViewModel, error) {
+	if v.Hidden {
+		return ListViewModel{}, fmt.Errorf("this is a hidden system view")
+	}
+	viewType, err := v.viewType()
+	if err != nil {
+		return ListViewModel{}, err
+	}
+	fields, err := v.viewFields()
+	if err != nil {
+		return ListViewModel{}, err
+	}
+
+	fieldsValue := types.ListNull(types.StringType)
+	if len(fields) > 0 {
+		values := make([]attr.Value, len(fields))
+		for i, f := range fields {
+			values[i] = types.StringValue(f)
+		}
+		fieldsValue = types.ListValueMust(types.StringType, values)
+	}
+	viewQuery := types.StringNull()
+	if v.ViewQuery != "" {
+		viewQuery = types.StringValue(v.ViewQuery)
+	}
+
+	return ListViewModel{
+		ID:                     types.StringValue(m365.NormalizeGUID(v.Id)),
+		WebURL:                 types.StringValue(webURL),
+		ListTitle:              scope.Title,
+		ListID:                 scope.ID,
+		ListURL:                scope.URL,
+		Title:                  types.StringValue(v.Title),
+		Type:                   types.StringValue(viewType),
+		Fields:                 fieldsValue,
+		ViewQuery:              viewQuery,
+		CalendarStartDateField: types.StringNull(),
+		CalendarEndDateField:   types.StringNull(),
+		CalendarTitleField:     types.StringNull(),
+		CalendarSubTitleField:  types.StringNull(),
+		CalendarDefaultLayout:  types.StringValue("month"),
+		KanbanBucketField:      types.StringNull(),
+		Personal:               types.BoolValue(v.PersonalView),
+		Default:                types.BoolValue(v.DefaultView),
+		Paged:                  types.BoolValue(v.Paged),
+		RowLimit:               types.Int64Value(v.RowLimit),
+		Properties:             types.MapNull(types.StringType),
+	}, nil
 }

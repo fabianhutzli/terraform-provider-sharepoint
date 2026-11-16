@@ -20,6 +20,7 @@ import (
 )
 
 var _ resource.Resource = &HubSiteResource{}
+var _ resource.ResourceWithImportState = &HubSiteResource{}
 
 // HubSiteResource manages a SharePoint Online Communication Site registered
 // as a Hub Site.
@@ -71,9 +72,8 @@ func (r *HubSiteResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"owner": schema.StringAttribute{
-				Required:      true,
-				Description:   "UPN of the site owner, e.g. admin@contoso.onmicrosoft.com. Required in App-Only context because there is no user identity.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Required:    true,
+				Description: "UPN of the site owner, e.g. admin@contoso.onmicrosoft.com. Required in App-Only context because there is no user identity. Only used when the site is created; changing it later doesn't change the site's owner.",
 			},
 			"lcid": schema.Int64Attribute{
 				Optional:    true,
@@ -82,12 +82,11 @@ func (r *HubSiteResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Description: "Locale ID for the default site language (1033=en-US, 1031=de-DE, 1036=fr-FR, 1040=it-IT).",
 			},
 			"site_design": schema.StringAttribute{
-				Optional:      true,
-				Computed:      true,
-				Default:       stringdefault.StaticString("Topic"),
-				Description:   "Communication site design template: Blank, Showcase, or Topic.",
-				Validators:    []validator.String{stringvalidator.OneOf("Blank", "Showcase", "Topic")},
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Optional:    true,
+				Computed:    true,
+				Default:     stringdefault.StaticString("Topic"),
+				Description: "Communication site design template: Blank, Showcase, or Topic. Only used when the site is created; changing it later has no effect.",
+				Validators:  []validator.String{stringvalidator.OneOf("Blank", "Showcase", "Topic")},
 			},
 			"time_zone_id": schema.Int64Attribute{
 				Optional:    true,
@@ -335,6 +334,44 @@ func (r *HubSiteResource) Delete(ctx context.Context, req resource.DeleteRequest
 	); err != nil && !m365.IsNotFound(err) {
 		resp.Diagnostics.AddError("Failed to remove hub site", err.Error())
 	}
+}
+
+// ---- Import ----
+
+// ImportState imports an existing hub site by its URL, recording the
+// attributes Read doesn't refresh.
+func (r *HubSiteResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	siteURL, err := siteURLFromImportID(req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		return
+	}
+	if r.runner == nil {
+		resp.Diagnostics.AddError("Provider not configured", "The provider must be configured before resources can be imported.")
+		return
+	}
+
+	site, err := fetchTenantSite(ctx, r.runner, siteURL)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read site", err.Error())
+		return
+	}
+	if !site.IsHubSite {
+		resp.Diagnostics.AddError("Cannot import site",
+			"This site is not registered as a hub site; import it as sharepoint_site or sharepoint_associated_site instead.")
+		return
+	}
+	hub, err := fetchHubSite(ctx, r.runner, m365.NormalizeGUID(site.HubSiteId))
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read hub site", err.Error())
+		return
+	}
+	state, err := site.hubSiteModel(siteURL, hub)
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot import site", err.Error())
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 
 // ---- helpers ----
